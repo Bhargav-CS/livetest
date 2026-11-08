@@ -88,6 +88,7 @@ Rows marked ✅ were verified on LiveKit Cloud **and** on a self-hosted server (
   | 16 | 12–15 of 16 | 5–6 s | 0.5–0.6 s / 3.6–4.5 s |
 
 - **The limit is the agent's worker, not the tester.** At 16 the worker logged "no warmed process available" and slow job starts, and some agents never joined within 60 s. Splitting the tester into 2 × 8 processes did worse (10/16), so the tester's single process was not the bottleneck.
+- **LiveKit Cloud caps concurrent agent jobs per plan** (5 on Alive's project; seen 2026-11-08 during module 3's live tests). The job slot isn't freed the moment the tester leaves, so about 6 back-to-back sessions within a minute left the next one with no agent. Deleting the room (`DeleteRoom`, needs the API key) frees it at once. With only a token, livetest can't do that, so a run should pace back-to-back tests, and "agent never joined" must say the cap may be the cause.
 
 ### Room level (works on any LiveKit agent, even with the session host off)
 - ✅ **Agent participant:** identity, kind (`AGENT`), and attributes (`lk.agent.state`, `lk.agent.name`).

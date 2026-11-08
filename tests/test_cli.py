@@ -12,7 +12,7 @@ from dotenv import dotenv_values
 
 from livetest.cli import main
 from livetest.platform import keys, llm
-from livetest.runtime import store
+from livetest.runtime import session, store, tokens
 from livetest.runtime.models import Agent, Plugin, Profile, Scenario
 
 
@@ -36,6 +36,25 @@ def reachable(monkeypatch):
         return 0.25
 
     monkeypatch.setattr(llm, "check", check)
+    return seen
+
+
+@pytest.fixture(autouse=True)
+def got_token(monkeypatch):
+    """Every token source answers, so `agent add` saves without a network. Records connect()'s kwargs per check."""
+    seen = []
+
+    def connect(agent, room, profile=None, **kw):
+        seen.append(kw)
+        if agent.url and not (kw.get("key") and kw.get("secret")):
+            raise ValueError("no API key and secret")
+        return "wss://x", "token"
+
+    async def joins(*a, **kw):
+        return 1.5  # the agent joined
+
+    monkeypatch.setattr(tokens, "connect", connect)
+    monkeypatch.setattr(session, "joins", joins)
     return seen
 
 
@@ -72,6 +91,72 @@ def test_agent_add_list_rm(run, path):
     assert run("agent", "rm", "--name", "baymax", "-y") == 2  # alias works; already gone
 
 
+def test_agent_add_gets_a_token_first(run, path, got_token, monkeypatch):
+    assert run("agent", "add", "--name", "tok") == 0 and got_token == []  # token at run time: nothing to check
+
+    def fails(error):
+        def connect(*a, **kw):
+            raise error
+        return connect
+
+    monkeypatch.setattr(tokens, "connect", fails(ConnectionError("unreachable")))
+    assert run("agent", "add", "--name", "a", "--endpoint", "http://x/token") == 3
+    monkeypatch.setattr(tokens, "connect", fails(ValueError("endpoint refused")))
+    assert run("agent", "add", "--name", "a", "--sandbox", "sb") == 2
+    monkeypatch.setattr(tokens, "connect", lambda *a, **kw: ("wss://x", "token"))
+
+    async def never(*a, **kw):
+        raise ConnectionError("the agent never joined")
+
+    monkeypatch.setattr(session, "joins", never)  # got a token, but nobody came
+    assert run("agent", "add", "--name", "a", "--sandbox", "sb") == 3
+    assert list(saved(path, Agent)) == ["tok"]
+
+
+def test_agent_add_prompt_picks_the_source(run, path, monkeypatch):
+    answers = iter(["s", "sb-1", "e", "https://example.com/token", "u", "wss://lk.example.com", "t", ""])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda _: "typed")
+    for _ in range(4):
+        assert run("agent", "add") == 0
+    a = {n: m for n, (_, m) in saved(path, Agent).items()}
+    assert (a["s"].sandbox, a["e"].endpoint, a["u"].url) == ("sb-1", "https://example.com/token", "wss://lk.example.com")
+    assert a["t"].model_dump(exclude_none=True) == {"name": "t"}  # Enter: token at run time
+
+
+def test_ctrl_c_exits_quietly(run, path, monkeypatch, capsys):
+    def interrupt(_):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", interrupt)
+    assert run("agent", "add") == 130
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_agent_keys(run, path, got_token, monkeypatch):
+    env = path.parent / ".env"
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("getpass.getpass", lambda _: pytest.fail("a script must never be asked for a key"))
+    assert run("agent", "add", "--name", "dev-agent", "--url", "ws://lk:7880") == 2  # no keys, nobody to ask
+    monkeypatch.setenv("LIVETEST_AGENT_KEY_DEV_AGENT", "k-env")  # CI sets them as env vars
+    monkeypatch.setenv("LIVETEST_AGENT_SECRET_DEV_AGENT", "s-env")
+    assert run("agent", "add", "--name", "dev-agent", "--url", "ws://lk:7880") == 0
+    assert got_token[-1] == {"key": "k-env", "secret": "s-env"} and not env.exists()
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    typed = iter(["k-typed", "s-typed"])
+    monkeypatch.setattr("getpass.getpass", lambda _: next(typed))
+    assert run("agent", "add", "--name", "prod", "--url", "wss://prod.livekit.cloud") == 0
+    assert got_token[-1] == {"key": "k-typed", "secret": "s-typed"}
+    assert dotenv_values(env) == {"LIVETEST_AGENT_KEY_PROD": "k-typed", "LIVETEST_AGENT_SECRET_PROD": "s-typed"}
+    assert not any(b"s-typed" in f.read_bytes() for f in path.parent.iterdir() if f != env)  # DB, WAL
+    assert run("agent", "add", "--name", "dev.agent", "--sandbox", "sb") == 2  # would share dev-agent's keys
+    assert run("agent", "rm", "--name", "prod", "-y") == 0
+    assert dotenv_values(env) == {}  # its keys go with it
+
+
 def test_remove_needs_confirmation(run, path, monkeypatch):
     run("agent", "add", "--name", "keep", "--sandbox", "sb")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
@@ -89,6 +174,8 @@ def test_no_action_prints_help_without_touching_db(run, path, capsys):
     assert run() == 0 and "get started" in capsys.readouterr().out
     for group in ("agent", "profile", "scenario", "plugin"):
         assert run(group) == 0 and "actions" in capsys.readouterr().out
+    run("agent")
+    assert "remove an agent" in capsys.readouterr().out
     assert not path.parent.exists()
 
 
@@ -254,12 +341,15 @@ def test_plugin_add_prompts_or_fails(run, path, reachable, monkeypatch):
     assert not (path.parent / ".env").exists()
 
 
-def test_init_offers_a_tester_llm(run, path, reachable, monkeypatch):
+def test_init_offers_an_agent_then_a_tester_llm(run, path, reachable, monkeypatch, capsys):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    assert run("init") == 0 and active(path) == {}  # scripts are told, not asked
-    answers = iter(["y", "local", "http://localhost:8000/v1", "qwen"])
+    assert run("init") == 0 and active(path) == {} and saved(path, Agent) == {}  # scripts are told, not asked
+    assert "agent add -h" in capsys.readouterr().out
+    answers = iter(["y", "ALIVE", "sb-1",  # agent offer, name, source
+                    "y", "local", "http://localhost:8000/v1", "qwen"])  # LLM offer, name, URL, model
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
     monkeypatch.setattr("getpass.getpass", lambda _: "")
-    assert run("init") == 0 and active(path) == {"llm": "local"}
-    assert run("init") == 0  # has one now: asks nothing (answers are used up)
+    assert run("init") == 0
+    assert saved(path, Agent)["ALIVE"][1].sandbox == "sb-1" and active(path) == {"llm": "local"}
+    assert run("init") == 0  # has both now: asks nothing (answers are used up)

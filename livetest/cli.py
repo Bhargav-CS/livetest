@@ -6,6 +6,7 @@ import getpass
 import json
 import sqlite3
 import sys
+import uuid
 from contextlib import closing
 from importlib.metadata import version
 from pathlib import Path
@@ -14,7 +15,7 @@ from pydantic import ValidationError
 
 from livetest.platform import keys, llm
 from livetest.platform.db import DEFAULT_PATH
-from livetest.runtime import store
+from livetest.runtime import session, store, tokens
 from livetest.runtime.models import Agent, Participant, Plugin, Profile, Scenario, key_var
 
 
@@ -89,6 +90,17 @@ def env_file(args: argparse.Namespace) -> Path:
     return args.db.parent / ".env"  # keys sit next to the DB, never in it
 
 
+def secret_vars(kind: type, name: str) -> list[str]:
+    """The .env vars holding a plugin's key or an agent's API key and secret."""
+    return [key_var(name, w) for w in ("AGENT_KEY", "AGENT_SECRET")] if kind is Agent else [key_var(name)]
+
+
+def free(db: sqlite3.Connection, kind: type, name: str) -> None:
+    """Refuse a taken name, or one that would share another's keys in .env (a-b and a_b)."""
+    if taken := [m.name for _, m in store.rows(db, kind) if key_var(m.name) == key_var(name)]:
+        raise Fail(f"{label(kind)} '{taken[0]}' already exists" + ("" if taken[0] == name else f"; '{name}' would share its key"))
+
+
 def save(db: sqlite3.Connection, model) -> int:
     try:
         n = store.add(db, model)
@@ -101,14 +113,19 @@ def save(db: sqlite3.Connection, model) -> int:
 def cmd_init(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     # connect() in main() already created the DB; init is the friendly first step that says so.
     print(f"livetest is set up: {args.db}")
-    if "llm" not in store.active(db):
+    for what, why, missing, add, see, flags in (  # the agent first: it's what you came to test
+        ("agent", "the one you test", lambda: not store.rows(db, Agent), cmd_agent_add, "agent add -h",
+         dict(name=None, sandbox=None, endpoint=None, url=None)),
+        ("tester LLM", "the model that plays the user", lambda: "llm" not in store.active(db), cmd_plugin_add,
+         "plugin add -h", dict(plugin=None, kind="llm", provider=None, base_url=None, model=None)),
+    ):
+        if not missing():
+            continue
         if not sys.stdin.isatty():
-            print("no tester LLM yet; see: livetest plugin add -h")
-        elif ask("No tester LLM yet (the model that plays the user). Add one now? [Y/n] ").lower() in ("", "y", "yes"):
-            if code := cmd_plugin_add(db, argparse.Namespace(**vars(args), plugin=None, kind="llm", provider=None,
-                                                             base_url=None, model=None)):
+            print(f"no {what} yet; see: livetest {see}")
+        elif ask(f"No {what} yet ({why}). Add one now? [Y/n] ").lower() in ("", "y", "yes"):
+            if code := add(db, argparse.Namespace(**vars(args), **flags)):
                 return code
-    print("next: livetest agent add --name <agent_name> --sandbox <id>")
     return 0
 
 
@@ -121,8 +138,7 @@ def cmd_plugin_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
               "Provider or base URL: ", "--base-url")
     plugin = Plugin(name=name, kind=args.kind, base_url=llm.PRESETS.get(url, url),
                     model=need(args.model, "Model: ", "--model"))
-    if taken := [p.name for _, p in store.rows(db, Plugin) if key_var(p.name) == key_var(name)]:
-        raise Fail(f"plugin '{taken[0]}' already exists" + ("" if taken[0] == name else f"; '{name}' would share its key"))
+    free(db, Plugin, name)
     file = env_file(args)
     # ponytail: on Windows getpass reads the console even when stdin is redirected; fine until a CI box hangs on it
     key = getpass.getpass("API key (Enter for none): ").strip() if sys.stdin.isatty() else ""
@@ -166,10 +182,35 @@ def cmd_plugin_list(db: sqlite3.Connection, args: argparse.Namespace) -> int:
 
 def cmd_agent_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     name = need(args.name, "Agent name (its LiveKit agent_name): ", "--name")
-    sandbox = args.sandbox
-    if not (sandbox or args.endpoint or args.url):
-        sandbox = ask("Paste your sandbox ID (or press Enter to pass a token at run time): ") or None
-    return save(db, Agent(name=name, sandbox=sandbox, endpoint=args.endpoint, url=args.url))
+    source = given(sandbox=args.sandbox, endpoint=args.endpoint, url=args.url)
+    if not source and (where := ask("Sandbox ID, token endpoint (https://...) or LiveKit URL (wss://...);\n"
+                                    "Enter to pass a token when you run it: ")):
+        source = {"url" if where.startswith(("ws://", "wss://")) else
+                  "endpoint" if where.startswith(("http://", "https://")) else "sandbox": where}
+    agent = Agent(name=name, **source)
+    free(db, Agent, name)
+    file, names = env_file(args), secret_vars(Agent, name)
+    # ponytail: on Windows getpass reads the console even when stdin is redirected; same as plugin add
+    typed = {v: getpass.getpass(f"{q} (Enter to use ${v}): ").strip()
+             for v, q in zip(names, ("LiveKit API key", "API secret"))} if agent.url and sys.stdin.isatty() else {}
+    if source:  # like plugin add: prove it works, save nothing if it doesn't
+        key, secret = (typed.get(v) or keys.get(file, v) for v in names)
+        try:
+            url, token = tokens.connect(agent, f"livetest-{uuid.uuid4().hex[:8]}", key=key, secret=secret)
+            secs = asyncio.run(session.joins(url, token, key, secret))
+        except ConnectionError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 3
+        except ValueError as e:
+            raise Fail(e) from None
+        print(f"checked: {name} joined in {secs:.1f} s")
+    else:
+        print("no token source: pass its token with --token when you run it")
+    save(db, agent)
+    for v, s in typed.items():
+        if s:
+            keys.save(file, v, s)
+    return 0
 
 
 def cmd_profile_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
@@ -228,8 +269,9 @@ def cmd_remove(db: sqlite3.Connection, args: argparse.Namespace) -> int:
         return 0
     if not store.remove(db, args.kind, name):
         raise Fail(f"no {what} named '{name}'; see: livetest {what} list")
-    if args.kind is Plugin:
-        keys.remove(env_file(args), key_var(name))  # its key goes with it
+    if args.kind in (Agent, Plugin):
+        for v in secret_vars(args.kind, name):  # its keys go with it
+            keys.remove(env_file(args), v)
     print(f"removed {what} '{name}'")
     return 0
 
@@ -251,12 +293,13 @@ def group(sub, kind: type, help: str, *examples: str):
 def list_and_remove(actions, kind: type) -> None:
     """The shared actions every group has."""
     what, f = label(kind), flag(kind)
+    a = "an" if what[0] in "aeiou" else "a"
     p = cmd(actions, "list", cmd_list, f"list {what}s", f"livetest {what} list", f"livetest {what} list --json")
     p.add_argument("--json", action="store_true", help="print JSON for scripts")
     p.set_defaults(kind=kind)
-    p = cmd(actions, "remove", cmd_remove, f"remove a {what}", f"livetest {what} remove --{f} my-{what}",
+    p = cmd(actions, "remove", cmd_remove, f"remove {a} {what}", f"livetest {what} remove --{f} my-{what}",
             f"livetest {what} rm --{f} my-{what} -y",
-            description=f"Remove a {what}. Asks first at a terminal; scripts pass -y.", aliases=["rm"])
+            description=f"Remove {a} {what}. Asks first at a terminal; scripts pass -y.", aliases=["rm"])
     p.add_argument(f"--{f}", help=f"the {what}'s name")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
     p.set_defaults(kind=kind)
@@ -303,11 +346,15 @@ def main(argv: list[str] | None = None) -> int:
             "livetest agent add --name my-agent --url ws://localhost:7880",
             "livetest agent add --name my-agent --endpoint https://example.com/api/token",
             description="Add an agent to test. Give at most one of --sandbox, --endpoint, --url.\n"
-                        "Leave out --name or all three and livetest asks for them.")
+                        "Leave out --name or all three and livetest asks for them. It proves the agent works first:\n"
+                        "gets a token, joins a fresh room and waits for the agent (one short session); saves nothing\n"
+                        "if it never joins. With --url it asks for the API key and secret (hidden) and saves them in\n"
+                        ".env next to the database; scripts set LIVETEST_AGENT_KEY_<NAME> / LIVETEST_AGENT_SECRET_<NAME>.\n"
+                        "With none of the three, pass a token with --token each time you use the agent.")
     p.add_argument("--name", help="the agent's LiveKit agent_name (what it registered with)")
     p.add_argument("--sandbox", metavar="ID", help="LiveKit sandbox token server ID")
     p.add_argument("--endpoint", metavar="URL", help="your token endpoint")
-    p.add_argument("--url", help="LiveKit server URL; key and secret come from LIVEKIT_API_KEY / LIVEKIT_API_SECRET")
+    p.add_argument("--url", help="LiveKit server URL; livetest makes tokens with the agent's API key and secret")
     list_and_remove(actions, Agent)
 
     actions = group(sub, Profile, "Add, list or remove profiles: who the tester is, as the agent sees them.",
@@ -383,6 +430,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with closing(store.connect(args.db)) as db:
             return args.func(db, args)
+    except KeyboardInterrupt:  # Ctrl+C: stop quietly, the shell's usual code
+        print(file=sys.stderr)
+        return 130
     except (Fail, sqlite3.DatabaseError) as e:
         print(f"error: {e}", file=sys.stderr)
     except ValidationError as e:
