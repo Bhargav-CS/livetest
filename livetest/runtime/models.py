@@ -99,6 +99,20 @@ class Latency(Strict):
 Check = Annotated[ToolCheck | NoToolErrors | Latency, Field(discriminator="type")]
 
 
+class Plugin(Strict):
+    """What the tester thinks with: any OpenAI-compatible server. One per kind is active. Its key is never stored here."""
+
+    name: Name = Field(description="What `plugin use --plugin` calls it")
+    kind: Literal["llm"] = "llm"  # stt and tts come with voice mode
+    base_url: str = Field(min_length=1, description="The server's OpenAI-compatible base URL")
+    model: str = Field(min_length=1)
+
+
+def key_var(plugin: str) -> str:
+    """The env var holding a plugin's API key: my-groq → LIVETEST_KEY_MY_GROQ."""
+    return "LIVETEST_KEY_" + re.sub(r"\W", "_", plugin).upper()
+
+
 class Scenario(Strict):
     """One test: what the tester wants and how they behave. Global: the run picks the agent and profile."""
 

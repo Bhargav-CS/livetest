@@ -1,15 +1,19 @@
-"""The CLI and the DB behind it (`init`, `agent`, `profile`, `scenario`, migrations), against a throwaway DB."""
+"""The CLI and the DB behind it (`init`, `agent`, `profile`, `scenario`, `plugin`, migrations), against a throwaway DB."""
 
 import json
+import os
+import socket
 import sqlite3
 import sys
 from contextlib import closing
 
 import pytest
+from dotenv import dotenv_values
 
 from livetest.cli import main
+from livetest.platform import keys, llm
 from livetest.runtime import store
-from livetest.runtime.models import Agent, Profile, Scenario
+from livetest.runtime.models import Agent, Plugin, Profile, Scenario
 
 
 @pytest.fixture
@@ -22,10 +26,36 @@ def run(path):
     return lambda *a: main(["--db", str(path), *a])
 
 
+@pytest.fixture
+def reachable(monkeypatch):
+    """Every LLM answers, so `plugin add` saves without a server. Records (base_url, model, key) per check."""
+    seen = []
+
+    async def check(*a):
+        seen.append(a)
+        return 0.25
+
+    monkeypatch.setattr(llm, "check", check)
+    return seen
+
+
+@pytest.fixture
+def dead_url():
+    with socket.socket() as s:  # a port nothing listens on once closed
+        s.bind(("127.0.0.1", 0))
+        return f"http://127.0.0.1:{s.getsockname()[1]}/v1"
+
+
 def saved(path, kind):
     """{name: (number, model)} as stored."""
     with closing(store.connect(path)) as conn:
         return {m.name: (n, m) for n, m in store.rows(conn, kind)}
+
+
+def active(path):
+    """{kind: plugin name} of the active plugins."""
+    with closing(store.connect(path)) as conn:
+        return {k: p.name for k, p in store.active(conn).items()}
 
 
 def test_init_creates_db(run, path):
@@ -57,7 +87,7 @@ def test_remove_needs_confirmation(run, path, monkeypatch):
 
 def test_no_action_prints_help_without_touching_db(run, path, capsys):
     assert run() == 0 and "get started" in capsys.readouterr().out
-    for group in ("agent", "profile", "scenario"):
+    for group in ("agent", "profile", "scenario", "plugin"):
         assert run(group) == 0 and "actions" in capsys.readouterr().out
     assert not path.parent.exists()
 
@@ -156,3 +186,80 @@ def test_newer_db_refused(run, path):
     with closing(sqlite3.connect(path)) as conn:
         conn.execute("PRAGMA user_version = 999")
     assert run("agent", "list") == 2
+
+
+def test_plugin_add_use_list_rm(run, path, reachable, capsys):
+    assert run("plugin", "add", "--plugin", "local", "--base-url", "http://localhost:8000/v1", "--model", "qwen") == 0
+    assert run("plugin", "add", "--plugin", "groq", "--provider", "groq", "--model", "gpt-oss") == 0
+    assert saved(path, Plugin)["groq"][1].base_url == llm.PRESETS["groq"]
+    assert active(path) == {"llm": "local"}  # the first of its kind is active
+    assert run("plugin", "use", "--plugin", "groq") == 0
+    assert active(path) == {"llm": "groq"}  # one active per kind
+    capsys.readouterr()
+    assert run("plugin", "list", "--json") == 0
+    assert {p["name"]: p["active"] for p in json.loads(capsys.readouterr().out)} == {"local": False, "groq": True}
+    assert run("plugin", "use", "--plugin", "nope") == 2
+    assert run("plugin", "rm", "--plugin", "groq", "-y") == 0
+    assert active(path) == {}  # removing the active one leaves none
+    assert "local" in saved(path, Plugin)
+
+
+def test_plugin_unreachable_saves_nothing(run, path, monkeypatch, dead_url, capsys):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda _: "sk-typed")
+    assert run("plugin", "add", "--plugin", "dead", "--base-url", dead_url, "--model", "m") == 3  # real call, nothing mocked
+    assert capsys.readouterr().err.startswith("error:")
+    assert saved(path, Plugin) == {} and not (path.parent / ".env").exists()
+
+
+def test_plugin_keys(run, path, reachable, monkeypatch, capsys):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda _: "sk-secret-123")
+    assert run("plugin", "add", "--plugin", "my-groq", "--provider", "groq", "--model", "m") == 0
+    env = path.parent / ".env"  # next to the DB
+    assert dotenv_values(env) == {"LIVETEST_KEY_MY_GROQ": "sk-secret-123"}
+    assert reachable[-1][2] == "sk-secret-123"  # the check used the typed key
+    if os.name == "posix":
+        assert env.stat().st_mode & 0o777 == 0o600
+    assert not any(b"sk-secret-123" in f.read_bytes() for f in path.parent.iterdir() if f != env)  # DB, WAL
+    capsys.readouterr()
+    assert run("plugin", "list") == 0
+    out = capsys.readouterr().out
+    assert "key: set" in out and "sk-secret" not in out
+    monkeypatch.setenv("LIVETEST_KEY_MY_GROQ", "from-env")
+    assert keys.get(env, "LIVETEST_KEY_MY_GROQ") == "from-env"  # a real env var beats the file
+    assert run("plugin", "rm", "--plugin", "my-groq", "-y") == 0
+    assert dotenv_values(env) == {}  # its key goes with it
+
+
+def test_plugin_names_sharing_a_key_refused(run, path, reachable):
+    assert run("plugin", "add", "--plugin", "a-b", "--base-url", "http://x/v1", "--model", "m") == 0
+    assert run("plugin", "add", "--plugin", "a-b", "--base-url", "http://x/v1", "--model", "m") == 2  # taken
+    assert run("plugin", "add", "--plugin", "a_b", "--base-url", "http://x/v1", "--model", "m") == 2  # same key var
+    assert len(reachable) == 1  # refused before calling the LLM
+
+
+def test_plugin_add_prompts_or_fails(run, path, reachable, monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr("getpass.getpass", lambda _: pytest.fail("a script must never be asked for a key"))
+    assert run("plugin", "add", "--plugin", "p", "--model", "m") == 2  # no URL, nobody to ask
+    assert run("plugin", "add", "--plugin", "p", "--provider", "groq") == 2  # no model
+    assert saved(path, Plugin) == {}
+    answers = iter(["asked", "gemini", "gemini-flash"])  # name, provider-or-URL, model
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda _: "")  # Enter: no key
+    assert run("plugin", "add") == 0
+    assert saved(path, Plugin)["asked"][1].base_url == llm.PRESETS["gemini"]
+    assert not (path.parent / ".env").exists()
+
+
+def test_init_offers_a_tester_llm(run, path, reachable, monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert run("init") == 0 and active(path) == {}  # scripts are told, not asked
+    answers = iter(["y", "local", "http://localhost:8000/v1", "qwen"])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda _: "")
+    assert run("init") == 0 and active(path) == {"llm": "local"}
+    assert run("init") == 0  # has one now: asks nothing (answers are used up)
