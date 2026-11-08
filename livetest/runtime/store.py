@@ -70,6 +70,11 @@ MIGRATIONS = [
     );
     CREATE INDEX events_by_result ON events (result, ts);
     """,
+    # 5. The verdict next to the status, written together, so run lists and pass rates need no JSON.
+    """
+    ALTER TABLE results ADD COLUMN passed INTEGER;  -- 1 | 0; NULL = not checked (status isn't done)
+    ALTER TABLE results ADD COLUMN checks TEXT;     -- JSON: checks.evaluate's outcomes
+    """,
 ]
 
 TABLES = {Agent: "agents", Profile: "profiles", Scenario: "scenarios", Plugin: "plugins"}
@@ -120,10 +125,12 @@ def event(conn: sqlite3.Connection, result: int, source: str, type: str, data, t
                      (result, time.time() if ts is None else ts, source, type, json.dumps(data)))
 
 
-def finish_result(conn: sqlite3.Connection, result: int, status: str, ended: str | None) -> None:
+def finish_result(conn: sqlite3.Connection, result: int, status: str, ended: str | None,
+                  checks: list[dict] | None = None) -> None:
+    passed, checks = (None, None) if checks is None else (all(c["passed"] for c in checks), json.dumps(checks))
     with conn:
-        conn.execute("UPDATE results SET status = ?, ended = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                     (status, ended, result))
+        conn.execute("UPDATE results SET status = ?, ended = ?, passed = ?, checks = ?, finished_at = CURRENT_TIMESTAMP "
+                     "WHERE id = ?", (status, ended, passed, checks, result))
 
 
 def result(conn: sqlite3.Connection, result: int) -> dict:
@@ -131,10 +138,10 @@ def result(conn: sqlite3.Connection, result: int) -> dict:
     return dict(zip([c[0] for c in cur.description], cur.fetchone()))
 
 
-def events(conn: sqlite3.Connection, result: int) -> list[tuple[str, str, object]]:
-    """(source, type, data) in the order they happened."""
-    found = conn.execute("SELECT source, type, data FROM events WHERE result = ? ORDER BY ts, rowid", (result,))
-    return [(source, t, json.loads(data)) for source, t, data in found]
+def events(conn: sqlite3.Connection, result: int) -> list[tuple[float, str, str, object]]:
+    """(ts, source, type, data) in the order they happened."""
+    found = conn.execute("SELECT ts, source, type, data FROM events WHERE result = ? ORDER BY ts, rowid", (result,))
+    return [(ts, source, t, json.loads(data)) for ts, source, t, data in found]
 
 
 def active(conn: sqlite3.Connection) -> dict[str, Plugin]:

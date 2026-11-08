@@ -118,22 +118,22 @@ def test_logs_land_on_their_own_test(db):
     asyncio.run(both())
     log.info("outside any test")
     for n in (a, b):
-        assert [(src, t, d["message"]) for src, t, d in store.events(db, n)] == [("log", "INFO", f"from {n}")]
+        assert [(src, t, d["message"]) for _, src, t, d in store.events(db, n)] == [("log", "INFO", f"from {n}")]
 
 
 @selfhost
 def test_max_turns(db, stub, tester, caplog):
     caplog.set_level(logging.INFO)  # what the CLI's logging setup does
     res, evs = run(db, tester("hello", "please use the tool", "thanks"), Scenario(name="s", goal="g", max_turns=3))
-    assert (res["status"], res["ended"], res["room"].startswith("livetest-")) == ("done", "max_turns", True)
-    of = lambda kind: [d for _, t, d in evs if t == kind]
+    assert (res["status"], res["ended"], res["room"].startswith("livetest-"), res["passed"]) == ("done", "max_turns", True, 1)
+    of = lambda kind: [d for _, _, t, d in evs if t == kind]
     assert [d["text"] for d in of("tester_turn")] == ["hello", "please use the tool", "thanks"]
     info = of("agent_info")[0]
     assert "Stub agent" in info["instructions"] and "lookup" in json.dumps(info["tools"])
     assert len(of("tool_execution_updated")) == 2  # started, ended: the tool's real duration
     # No session_usage_updated: the stub runs no model, so it has no usage (Baymax's probes show it).
-    assert {"framework", "session_state", "chat_history", "seen", "conversation_item_added"} <= {t for _, t, _ in evs}
-    assert any(src == "log" for src, _, _ in evs)
+    assert {"framework", "session_state", "chat_history", "seen", "conversation_item_added"} <= {t for _, _, t, _ in evs}
+    assert any(src == "log" for _, src, _, _ in evs)
     # The agent's replies reach the tester as the other side of its conversation.
     assert {"role": "user", "content": "Done, I found it."} in tester.asked[-1]["messages"]
 
