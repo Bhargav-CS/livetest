@@ -1,6 +1,8 @@
 """The CLI (entry point): parse flags, call runtime, print. The UI calls the same runtime functions."""
 
 import argparse
+import asyncio
+import getpass
 import json
 import sqlite3
 import sys
@@ -10,9 +12,10 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from livetest.platform import keys, llm
 from livetest.platform.db import DEFAULT_PATH
 from livetest.runtime import store
-from livetest.runtime.models import Agent, Participant, Profile, Scenario
+from livetest.runtime.models import Agent, Participant, Plugin, Profile, Scenario, key_var
 
 
 class Fail(Exception):
@@ -82,6 +85,10 @@ def flag(kind: type) -> str:
     return "name" if kind is Agent else label(kind)  # rule 3: --name is only ever the agent
 
 
+def env_file(args: argparse.Namespace) -> Path:
+    return args.db.parent / ".env"  # keys sit next to the DB, never in it
+
+
 def save(db: sqlite3.Connection, model) -> int:
     try:
         n = store.add(db, model)
@@ -94,7 +101,66 @@ def save(db: sqlite3.Connection, model) -> int:
 def cmd_init(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     # connect() in main() already created the DB; init is the friendly first step that says so.
     print(f"livetest is set up: {args.db}")
+    if "llm" not in store.active(db):
+        if not sys.stdin.isatty():
+            print("no tester LLM yet; see: livetest plugin add -h")
+        elif ask("No tester LLM yet (the model that plays the user). Add one now? [Y/n] ").lower() in ("", "y", "yes"):
+            if code := cmd_plugin_add(db, argparse.Namespace(**vars(args), plugin=None, kind="llm", provider=None,
+                                                             base_url=None, model=None)):
+                return code
     print("next: livetest agent add --name <agent_name> --sandbox <id>")
+    return 0
+
+
+def cmd_plugin_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    name = need(args.plugin, "Plugin name: ", "--plugin")
+    url = args.base_url or llm.PRESETS.get(args.provider) or need(
+        None, f"Provider ({', '.join(llm.PRESETS)}) or a base URL, e.g.\n"
+              "  https://api.together.xyz/v1   any OpenAI-compatible API\n"
+              "  http://localhost:8000/v1      a server on your machine (vLLM; Ollama is http://localhost:11434/v1)\n"
+              "Provider or base URL: ", "--base-url")
+    plugin = Plugin(name=name, kind=args.kind, base_url=llm.PRESETS.get(url, url),
+                    model=need(args.model, "Model: ", "--model"))
+    if taken := [p.name for _, p in store.rows(db, Plugin) if key_var(p.name) == key_var(name)]:
+        raise Fail(f"plugin '{taken[0]}' already exists" + ("" if taken[0] == name else f"; '{name}' would share its key"))
+    file = env_file(args)
+    # ponytail: on Windows getpass reads the console even when stdin is redirected; fine until a CI box hangs on it
+    key = getpass.getpass("API key (Enter for none): ").strip() if sys.stdin.isatty() else ""
+    try:
+        secs = asyncio.run(llm.check(plugin.base_url, plugin.model, key or keys.get(file, key_var(name))))
+    except ConnectionError as e:
+        print(f"error: {plugin.model} at {plugin.base_url} didn't answer ({e}); check the URL, model and key",
+              file=sys.stderr)
+        return 3
+    print(f"checked: first token in {secs:.1f} s")
+    save(db, plugin)
+    if key:
+        keys.save(file, key_var(name), key)
+    if plugin.kind not in store.active(db):
+        store.use(db, name)
+        print(f"it's the active {plugin.kind}")
+    return 0
+
+
+def cmd_plugin_use(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    name = need(args.plugin, "Plugin to make active: ", "--plugin")
+    if not store.use(db, name):
+        raise Fail(f"no plugin named '{name}'; see: livetest plugin list")
+    print(f"'{name}' is now active")
+    return 0
+
+
+def cmd_plugin_list(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    on = {p.name for p in store.active(db).values()}
+    found = [m.model_dump(mode="json") | {"active": m.name in on, "key": bool(keys.get(env_file(args), key_var(m.name)))}
+             for _, m in store.rows(db, Plugin)]  # whether a key is set, never the key
+    if args.json:
+        print(json.dumps(found, indent=2))
+    elif not found:
+        print("none yet; see: livetest plugin add -h")
+    for p in [] if args.json else found:
+        print(f"{'*' if p['active'] else ' '} {p['name']:<20} {p['kind']:<4} {p['base_url']:<40} {p['model']}  "
+              f"key: {'set' if p['key'] else 'none'}")
     return 0
 
 
@@ -162,6 +228,8 @@ def cmd_remove(db: sqlite3.Connection, args: argparse.Namespace) -> int:
         return 0
     if not store.remove(db, args.kind, name):
         raise Fail(f"no {what} named '{name}'; see: livetest {what} list")
+    if args.kind is Plugin:
+        keys.remove(env_file(args), key_var(name))  # its key goes with it
     print(f"removed {what} '{name}'")
     return 0
 
@@ -204,6 +272,7 @@ manage:
   agent       add, list or remove the agents you test
   profile     add, list or remove who the tester is, as the agent sees them
   scenario    add, list or remove what the tester tries to get done
+  plugin      add, list, remove or pick the LLM the tester thinks with
 """
 
 
@@ -283,6 +352,29 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--p99-ms", type=int, metavar="MS", help="reply latency limit, 99th percentile")
     list_and_remove(actions, Scenario)
     actions.choices["list"].add_argument("--tag", help="only scenarios with this tag")
+
+    actions = group(sub, Plugin, "Add, list, remove or pick plugins: the LLM the tester thinks with. One per kind is active.",
+                    "livetest plugin add --plugin local-qwen --base-url http://localhost:8000/v1 --model Qwen/Qwen3.5-2B",
+                    "livetest plugin use --plugin my-groq", "livetest plugin list")
+    p = cmd(actions, "add", cmd_plugin_add, "add a plugin; checks that it answers first",
+            "livetest plugin add                      # asks for everything",
+            "livetest plugin add --plugin local-qwen --base-url http://localhost:8000/v1 --model Qwen/Qwen3.5-2B",
+            "livetest plugin add --plugin my-groq --provider groq --model openai/gpt-oss-120b",
+            "livetest plugin add --plugin together --base-url https://api.together.xyz/v1 --model meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            description="Add a plugin: any OpenAI-compatible server. At a terminal it asks for the API key (hidden) and\n"
+                        "saves it in .env next to the database, never in it; scripts set LIVETEST_KEY_<PLUGIN> instead.\n"
+                        "Makes one streamed call first and saves nothing if that fails. The first of its kind is active.")
+    p.add_argument("--plugin", help="its name")
+    p.add_argument("--kind", choices=["llm"], default="llm", help="what it does (default: llm; stt and tts come later)")
+    p.add_argument("--provider", choices=llm.PRESETS, help="fills in --base-url for a cloud provider")
+    p.add_argument("--base-url", metavar="URL", help="any OpenAI-compatible URL: an API (https://api.together.xyz/v1) "
+                                                     "or your own server (http://localhost:8000/v1)")
+    p.add_argument("--model", help="the model's name on that server")
+    list_and_remove(actions, Plugin)
+    actions.choices["list"].set_defaults(func=cmd_plugin_list)
+    p = cmd(actions, "use", cmd_plugin_use, "make a plugin the active one of its kind",
+            "livetest plugin use --plugin my-groq")
+    p.add_argument("--plugin", help="its name")
 
     args = parser.parse_args(argv)
     if args.func is None:

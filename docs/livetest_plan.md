@@ -84,6 +84,7 @@ livetest uninstall                         (later)
 livetest agent    add | list | remove | probe                       --name <agent_name>        ✓ add/list/remove
 livetest scenario add | list | remove | generate     --scenario <scenario>   [--tag T]
 livetest profile  add | list | remove                --profile <profile>
+livetest plugin   add | list | remove | use          --plugin <plugin>   [--kind llm]      ✓
 
 livetest run      start | list | stop | logs         --name <agent_name> --scenario <selection> [--profile P]
 livetest ui       show | serve [--port] | stop
@@ -93,8 +94,8 @@ livetest report   create                             --run <run|latest> [--test 
 **Rules**
 
 1. **Shape:** things you manage are `livetest <group> <action> [flags]`; one-shot actions are `livetest <verb>`.
-2. **Same actions everywhere:** `add`, `list`, `remove` (alias `rm`). No `show` (`list` covers it) and no `edit` (remove and add again, or change the DB; the UI edits). Groups add their own only where needed: `agent probe`, `scenario generate`, the `run` actions, `report create`.
-3. **Names are flags, never positional. `--name` always means the agent under test** (its LiveKit `agent_name`, as used in explicit dispatch), and appears only where an agent is involved: `agent …` and `run …`. Other things are named by a flag of their own, with the same meaning in every command: `--profile`, `--scenario`, `--run` (a run's id, or `latest`; on `run start` it sets the new run's id), `--test` (one conversation in a run: one scenario × one repeat).
+2. **Same actions everywhere:** `add`, `list`, `remove` (alias `rm`). No `show` (`list` covers it) and no `edit` (remove and add again, or change the DB; the UI edits). Groups add their own only where needed: `agent probe`, `scenario generate`, `plugin use`, the `run` actions, `report create`.
+3. **Names are flags, never positional. `--name` always means the agent under test** (its LiveKit `agent_name`, as used in explicit dispatch), and appears only where an agent is involved: `agent …` and `run …`. Other things are named by a flag of their own, with the same meaning in every command: `--profile`, `--scenario`, `--plugin`, `--run` (a run's id, or `latest`; on `run start` it sets the new run's id), `--test` (one conversation in a run: one scenario × one repeat).
 4. **Help at every level, never an error:** a command or group typed without its action prints its help, exit 0, without touching the DB. Every help screen ends with copy-paste examples. Root help groups commands by purpose (`COMMANDS` in `cli.py`).
 5. **Prompt at a terminal, fail clearly in a script:** missing values are asked for at a terminal. In a script they fail and name the flag that fixes it. Destructive actions ask "are you sure?" at a terminal; scripts must pass `-y`.
 6. **Output:** plain text for people. `--json` on `list` and `run` for scripts, CI and AI tools (Claude will prefer the CLI). Errors go to stderr, start with `error:` and say what to do next. No tracebacks unless `-v`.
@@ -146,7 +147,8 @@ livetest report create --run latest --output ~/Desktop/nightly.html
 - How to get a token is saved on the agent (`agent add --sandbox | --endpoint | --url`). An agent saved without one takes `--token` on `run start` / `agent probe` (env `LIVETEST_TOKEN`).
 - `--url` mode reads `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`. SIP-only agents need `--kind sip`, which only the API-key mode or the user's own endpoint can set.
 - **Precedence:** flag > env var > what's saved in livetest.
-- **Keys (LLM, STT, TTS, API secret):** `livetest init` asks for them (the UI's Settings page will too) and saves them in `~/.livetest/.env`, readable only by the user. Real env vars override it, for CI. Keys never go in the DB or in results. The OS keychain (`keyring`) is the upgrade if users ask.
+- **Plugins (decided 2026-11-08):** the tester's LLM / STT / TTS. Users add as many as they like (`plugin add`, or the UI's Plugins tab) and set one active per kind (`plugin use`). All are OpenAI-compatible for now (`--provider openai|groq|gemini` presets the base URL; none means a local server, e.g. vLLM, Ollama). Every LLM goes through `livekit.plugins.openai.LLM`, which always streams. `plugin add` makes one streamed call first and saves nothing if it fails. Native provider plugins (e.g. Anthropic) later if needed. A run will take `--llm NAME` / `LIVETEST_LLM` to override the active one (module 7).
+- **Keys (plugins, API secret):** asked by `plugin add` (hidden input) and `init`, and saved in `~/.livetest/.env` (next to the DB) as `LIVETEST_KEY_<PLUGIN>`, readable only by the user. Real env vars override it, for CI. Keys never go in the DB or in results. The OS keychain (`keyring`) is the upgrade if users ask.
 
 ### Where data lives
 
@@ -248,8 +250,8 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
    - [ ] Fallback to `lk.chat` when the session host is off; transcript-only mode
 2. **Bring your own keys**
    - [~] Any LiveKit STT/TTS plugin for the tester (Deepgram, ElevenLabs used so far)
-   - [ ] Tester LLM through any OpenAI-compatible `base_url` (vLLM, Ollama, private-ai, cloud providers)
-   - [ ] Keys asked by `init` / UI Settings, saved in `~/.livetest/.env`, env vars override; never written into results
+   - [x] Tester LLM through any OpenAI-compatible `base_url` (vLLM, Ollama, private-ai, cloud providers), always streamed; many plugins, one active per kind (`livetest/platform/llm.py`, `plugin add|list|rm|use`)
+   - [x] Keys asked by `plugin add` / `init` (UI Plugins tab with module 11), saved in `~/.livetest/.env`, env vars override; never in the DB (`livetest/platform/keys.py`)
 3. **Logs, traces and recordings for every test**
    - [~] Session-host events: tool calls, state changes, usage, metrics, what the agent's STT heard
    - [~] Tool calls rebuilt as tester-side OTel spans with real durations
@@ -308,7 +310,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
 | Dev, lockfile, install | uv | already used; `uv tool install` gives users an isolated tool with its own Python |
 | CLI | argparse (stdlib) | `-h` on every subcommand for free |
 | Scenario models + JSON Schema | pydantic (installed) | validation and schema from one model |
-| Tester LLM + judge | `openai` client (installed) with `base_url` | covers any OpenAI-compatible endpoint (vLLM, Ollama, private-ai, Claude, Gemini, OpenAI) |
+| Tester LLM + judge | `livekit.plugins.openai.LLM` (installed) with `base_url` | always streams; covers any OpenAI-compatible endpoint (vLLM, Ollama, private-ai, Groq, Gemini, OpenAI); the same object drops into voice mode's `AgentSession` |
 | Results store | sqlite3 (stdlib, SQLite 3.50) | one file, JSON functions built in, WAL so the UI reads while a run writes |
 | UI server | aiohttp.web (installed) | its `FileResponse` handles HTTP Range, which browsers need to seek in audio; stdlib `http.server` doesn't |
 | Viewer front end | one HTML page, vanilla JS, no build step | nothing to bundle, so it ships as package data |
@@ -406,7 +408,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | # | Status | Module | Where | Proven by | Needs LiveKit? |
 |---|---|---|---|---|---|
 | 1 | [x] | Profiles and scenarios in the DB: `PRAGMA user_version` migrations, generic JSON-row helper, scenario numbers + tags, `expect` tagged union, `max_minutes`; flags only; `profile` / `scenario add\|list\|rm` | `runtime/models.py`, `runtime/store.py`, `cli.py` | pytest (`tests/test_cli.py`) | no |
-| 2 | [ ] | Keys and the tester LLM: `init` asks for keys → `~/.livetest/.env`; one OpenAI-compatible client; Groq out of user deps | `platform/llm.py`, `cli.py` | pytest + one call to private-ai | no |
+| 2 | [x] | Plugins and keys: `plugin add\|list\|remove\|use` (LLM now; STT/TTS in 9), one active per kind, keys → `~/.livetest/.env`; OpenAI-compatible streaming LLM; `init` offers the first one; Groq out of user deps | `platform/{llm,keys}.py`, `runtime/{models,store}.py`, `cli.py` | pytest + one streamed call to private-ai | no |
 | 3 | [ ] | Tokens: sandbox, endpoint, API key, raw token; profile applied to each; raw token decoded and checked against the profile | `runtime/tokens.py` | pytest + self-hosted pod + sandbox | yes |
 | 4 | [ ] | `agent probe`: join, dispatch, wait for the agent, read prompt / tools / session options; exit 3 when it never joins | `runtime/session.py`, `cli.py` | self-hosted stub agent | yes |
 | 5 | [ ] | One text-mode test: tester LLM drives `RemoteSession`; ends on max_turns / max_minutes / agent ends; results, events, logs written live | `runtime/runner.py`, `runtime/store.py` | self-hosted stub agent | yes |

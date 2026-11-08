@@ -5,7 +5,8 @@ description = "End-to-end tests for any LiveKit agent, from just a token"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "livekit-agents[silero,deepgram,groq,elevenlabs]==1.7.1",
+    # openai: the tester's LLM plugin (any OpenAI-compatible server, always streamed).
+    "livekit-agents[silero,deepgram,elevenlabs,openai]==1.7.1",
     "python-dotenv==1.2.3",
     # Imported directly by telemetry.py; already pulled in by livekit-agents.
     "opentelemetry-sdk==1.39.1",
@@ -28,4 +29,5 @@ module-root = ""  # package is ./livetest, not ./src/livetest
 [dependency-groups]
 dev = [
     "pytest==9.2.0",
+    "livekit-agents[groq]==1.7.1",  # dev/agent.py only
 ]
