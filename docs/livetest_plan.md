@@ -338,16 +338,17 @@ Only `livetest/` ships to users (the wheel holds nothing else). The rest of the 
 
 ```
 livetest/
-├── platform/      what livetest needs to run, kept generic: db.py, llm.py, stt.py, tts.py, logging.py
-├── runtime/       what livetest does: models.py, store.py; later tokens, session building, runner, checks, judge
-├── integrations/  optional extras, switched on by the entry point: otel.py (Grafana / Langfuse via OTLP)
+├── platform/      what livetest needs to run, kept generic: db.py, keys.py, llm.py; stt.py, tts.py, logging.py (empty: where they go)
+├── runtime/       what livetest does: models.py, store.py, tokens.py, session.py; later runner, checks, cost
+├── integrations/  optional extras, switched on by the entry point: otel.py (empty: where OTLP export to Grafana / Langfuse goes)
 ├── ui/            entry point: server.py (aiohttp + JSON API), static/ (the one page), report.py (that page with data baked in)
 └── cli.py         entry point
 tests/             pytest (dev-only dependency); test_layers.py enforces the rule below
-dev/               contributor-only: agent.py (voice prototype), livekit-server.yaml (self-hosted LiveKit)
+dev/               contributor-only: agent.py (voice prototype) + otel.py (its telemetry), livekit-server.yaml (self-hosted LiveKit)
 docs/              this plan and the research
 ```
 
+- **Empty placeholder files are kept on purpose:** they mark where a later implementation goes (user, 2026-11-08).
 - **Dependencies flow inward:** integrations → runtime → platform. A module imports its own layer or one further in, never further out. Entry points (`cli.py`, `ui/`) wire layers together, and nothing imports them.
 - **Platform knows nothing about livetest's data:** `platform/db.py` opens SQLite; `runtime/store.py` owns the tables and queries.
 - **CLI and UI are equal:** both call the same runtime functions.
