@@ -108,9 +108,9 @@ class Plugin(Strict):
     model: str = Field(min_length=1)
 
 
-def key_var(plugin: str) -> str:
-    """The env var holding a plugin's API key: my-groq → LIVETEST_KEY_MY_GROQ."""
-    return "LIVETEST_KEY_" + re.sub(r"\W", "_", plugin).upper()
+def key_var(name: str, what: str = "KEY") -> str:
+    """The env var holding a secret: plugin my-groq → LIVETEST_KEY_MY_GROQ; agents use AGENT_KEY / AGENT_SECRET."""
+    return f"LIVETEST_{what}_" + re.sub(r"\W", "_", name).upper()
 
 
 class Scenario(Strict):

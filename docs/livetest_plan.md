@@ -81,7 +81,7 @@ livetest init                              set up: DB, keys; starts the UI in th
 livetest doctor                            check the setup, fix common problems
 livetest uninstall                         (later)
 
-livetest agent    add | list | remove | probe                       --name <agent_name>        ✓ add/list/remove
+livetest agent    add | list | remove                               --name <agent_name>        ✓
 livetest scenario add | list | remove | generate     --scenario <scenario>   [--tag T]
 livetest profile  add | list | remove                --profile <profile>
 livetest plugin   add | list | remove | use          --plugin <plugin>   [--kind llm]      ✓
@@ -94,7 +94,7 @@ livetest report   create                             --run <run|latest> [--test 
 **Rules**
 
 1. **Shape:** things you manage are `livetest <group> <action> [flags]`; one-shot actions are `livetest <verb>`.
-2. **Same actions everywhere:** `add`, `list`, `remove` (alias `rm`). No `show` (`list` covers it) and no `edit` (remove and add again, or change the DB; the UI edits). Groups add their own only where needed: `agent probe`, `scenario generate`, `plugin use`, the `run` actions, `report create`.
+2. **Same actions everywhere:** `add`, `list`, `remove` (alias `rm`). No `show` (`list` covers it) and no `edit` (remove and add again, or change the DB; the UI edits). Groups add their own only where needed: `scenario generate`, `plugin use`, the `run` actions, `report create`.
 3. **Names are flags, never positional. `--name` always means the agent under test** (its LiveKit `agent_name`, as used in explicit dispatch), and appears only where an agent is involved: `agent …` and `run …`. Other things are named by a flag of their own, with the same meaning in every command: `--profile`, `--scenario`, `--plugin`, `--run` (a run's id, or `latest`; on `run start` it sets the new run's id), `--test` (one conversation in a run: one scenario × one repeat).
 4. **Help at every level, never an error:** a command or group typed without its action prints its help, exit 0, without touching the DB. Every help screen ends with copy-paste examples. Root help groups commands by purpose (`COMMANDS` in `cli.py`).
 5. **Prompt at a terminal, fail clearly in a script:** missing values are asked for at a terminal. In a script they fail and name the flag that fixes it. Destructive actions ask "are you sure?" at a terminal; scripts must pass `-y`.
@@ -144,8 +144,9 @@ livetest report create --run latest --output ~/Desktop/nightly.html
 - A report contains the agent's system prompt and recordings; sharing it shares those. Keys are never in it.
 
 **Connecting**
-- How to get a token is saved on the agent (`agent add --sandbox | --endpoint | --url`). An agent saved without one takes `--token` on `run start` / `agent probe` (env `LIVETEST_TOKEN`).
-- `--url` mode reads `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`. SIP-only agents need `--kind sip`, which only the API-key mode or the user's own endpoint can set.
+- How to get a token is saved on the agent (`agent add --sandbox | --endpoint | --url`). An agent saved without one takes `--token` on `run start` (env `LIVETEST_TOKEN`); the token is never saved, and an expired one fails with "pass a new one with --token".
+- **`agent add` proves the agent works (decided 2026-11-08, no `agent probe`):** it gets a token, joins a fresh room, waits up to 30 s for the agent and saves only if it joined (else exit 3). One short agent session; with the API key the room is deleted after, which frees the job slot. A broken setup that says "added" costs more than that session.
+- `--url` mode makes tokens with the agent's own API key and secret (per agent: dev and test projects differ), asked by `agent add` and saved in `.env` as `LIVETEST_AGENT_KEY_<NAME>` / `LIVETEST_AGENT_SECRET_<NAME>`. SIP-only agents need `--kind sip`, which only the API-key mode or the user's own endpoint can set.
 - **Precedence:** flag > env var > what's saved in livetest.
 - **Plugins (decided 2026-11-08):** the tester's LLM / STT / TTS. Users add as many as they like (`plugin add`, or the UI's Plugins tab) and set one active per kind (`plugin use`). All are OpenAI-compatible for now (`--provider openai|groq|gemini` presets the base URL; none means a local server, e.g. vLLM, Ollama). Every LLM goes through `livekit.plugins.openai.LLM`, which always streams. `plugin add` makes one streamed call first and saves nothing if it fails. Native provider plugins (e.g. Anthropic) later if needed. A run will take `--llm NAME` / `LIVETEST_LLM` to override the active one (module 7).
 - **Keys (plugins, API secret):** asked by `plugin add` (hidden input) and `init`, and saved in `~/.livetest/.env` (next to the DB) as `LIVETEST_KEY_<PLUGIN>`, readable only by the user. Real env vars override it, for CI. Keys never go in the DB or in results. The OS keychain (`keyring`) is the upgrade if users ask.
@@ -244,7 +245,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
 ### Core (the user's five asks)
 
 1. **End-to-end tests, with or without voice**
-   - [~] Join as a standard participant with the dispatch inside the token (Cloud and self-hosted)
+   - [x] Join as a standard participant with the dispatch inside the token, from a sandbox, endpoint, API key or raw token (`livetest/runtime/tokens.py`, `session.py`; live-tested on Cloud, self-hosted proven by probes)
    - [~] Voice mode: the tester's own STT, LLM and TTS (`dev/agent.py` does a fixed-duration conversation)
    - [~] Text mode through the session host (`RemoteSession`: `update_io` plus `run`), 0.3 to 3.4 s per turn
    - [ ] Fallback to `lk.chat` when the session host is off; transcript-only mode
@@ -270,11 +271,11 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
 5. **Scenarios that emulate the agent's users**
    - [x] DB at `~/.livetest/livetest.db`, created on first use (`livetest/platform/db.py`, tables in `livetest/runtime/store.py`)
    - [x] `livetest init`: sets up the DB (UI serving comes with the UI)
-   - [x] `livetest agent add/list/rm`: the agent's LiveKit `agent_name` plus how to get a token; prompts for missing name / sandbox ID (`livetest/cli.py`)
+   - [x] `livetest agent add/list/rm`: the agent's LiveKit `agent_name` plus how to get a token; one prompt picks sandbox / endpoint / URL; `add` joins and saves only if the agent came; per-agent keys in `.env` (`livetest/cli.py`)
    - [x] `livetest profile …` / `livetest scenario add|list|rm` in the DB, flags only; scenario numbers never reused; `PRAGMA user_version` migrations (`runtime/store.py`, `platform/db.py`)
    - [x] Scenario model: goal, persona, tags, `max_turns`, `max_minutes` (default 5), `expect` (tool_called / tool_not_called / no_tool_errors / latency) (`livetest/runtime/models.py`); evaluating them is module 6
    - [ ] Deterministic checks: tool called / not called (with args), text contains / regex, latency limits, turn limit, no tool errors, token/cost budget
-   - [~] Profiles: room metadata, participant metadata/attributes, dispatch metadata from the scenario (`scratchpad/probe_metadata.py`, self-hosted plus sandbox token)
+   - [x] Profiles applied to every token: room metadata, participant metadata/attributes, dispatch metadata; tokens livetest didn't make are checked against the profile (`livetest/runtime/tokens.py`)
    - [~] Reusable profiles in the DB done; what the agent actually saw, recorded in each result, not yet
 
 6. **CLI usability**
@@ -291,7 +292,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
 - [ ] **MCP server:** Claude Code or Cursor can run tests, read the root-cause analysis and fix the prompt in a loop.
 - [ ] **Security pack:**
   - attack scenarios: prompt extraction, injection, PII leaks
-  - a `probe` warning when the session host is open (any participant can read the prompt and inject turns)
+  - a warning when the session host is open (any participant can read the prompt and inject turns)
 - [ ] **Voice perturbations:** background noise, timed barge-ins, silences that hit `user_away_timeout`, speaking rate, accents.
 - [ ] **Import production transcripts as scenarios.**
 - [ ] **Cost estimate before a run.**
@@ -386,7 +387,7 @@ logs     (result_id, ts, level, logger, message)
 - **Only what we measure:** no LLM judge (verdicts, root causes, fixes), no run-to-run comparisons, no known-issue tracking until they're designed.
 - **Live:** transcript, state, tool calls and usage stream in; the recording arrives when each test ends (v0.1).
 - **JSON API** (`/api/runs`, `/api/results/<id>`, `/api/results/<id>/events`): the same data the page uses.
-- Still to design: agent detail with probe results, the scenario editor, the profile editor.
+- Still to design: agent detail with what the agent showed (prompt, tools), the scenario editor, the profile editor.
 
 ### Recordings in the UI
 
@@ -409,9 +410,9 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 |---|---|---|---|---|---|
 | 1 | [x] | Profiles and scenarios in the DB: `PRAGMA user_version` migrations, generic JSON-row helper, scenario numbers + tags, `expect` tagged union, `max_minutes`; flags only; `profile` / `scenario add\|list\|rm` | `runtime/models.py`, `runtime/store.py`, `cli.py` | pytest (`tests/test_cli.py`) | no |
 | 2 | [x] | Plugins and keys: `plugin add\|list\|remove\|use` (LLM now; STT/TTS in 9), one active per kind, keys → `~/.livetest/.env`; OpenAI-compatible streaming LLM; `init` offers the first one; Groq out of user deps | `platform/{llm,keys}.py`, `runtime/{models,store}.py`, `cli.py` | pytest + one streamed call to private-ai | no |
-| 3 | [ ] | Tokens: sandbox, endpoint, API key, raw token; profile applied to each; raw token decoded and checked against the profile | `runtime/tokens.py` | pytest + self-hosted pod + sandbox | yes |
-| 4 | [ ] | `agent probe`: join, dispatch, wait for the agent, read prompt / tools / session options; exit 3 when it never joins | `runtime/session.py`, `cli.py` | self-hosted stub agent | yes |
-| 5 | [ ] | One text-mode test: tester LLM drives `RemoteSession`; ends on max_turns / max_minutes / agent ends; results, events, logs written live | `runtime/runner.py`, `runtime/store.py` | self-hosted stub agent | yes |
+| 3 | [x] | Tokens: sandbox, endpoint, API key (per-agent keys in `.env`), raw token; profile applied to each; tokens livetest didn't make checked against the profile. `agent add` joins and waits for the agent before saving; `init` offers an agent, then an LLM | `runtime/tokens.py`, `runtime/session.py`, `cli.py` | pytest + deployed Baymax (Cloud) | yes |
+| 4 | — | ~~`agent probe`~~: dropped (user, 2026-11-08). Joining moved into `agent add` (module 3); reading prompt / tools / session options moves into the run (module 5) | | | |
+| 5 | [ ] | One text-mode test: tester LLM drives `RemoteSession`; reads and records the agent's prompt / tools / session options; ends on max_turns / max_minutes / agent ends; results, events, logs written live | `runtime/runner.py`, `runtime/store.py` | self-hosted stub agent | yes |
 | 6 | [ ] | Checks: built-ins (never joined, silent, loops) + user-set (tool checks with expected vs actual, latency p95/p99, finish within N min) | `runtime/checks.py` | pytest on saved event dumps | no |
 | 7 | [ ] | `run start\|list\|logs\|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop, `--json`, exit codes | `cli.py`, `runtime/runner.py` | pytest + self-hosted | yes |
 | 8 | [ ] | Usage and cost: agent cost and test cost from a built-in price table | `runtime/cost.py` | pytest on saved usage | no |
@@ -428,7 +429,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 
 | Version | Scope |
 |---|---|
-| v0.1 | See "v0.1 build order": connection modes, `-h` everywhere, `probe`, scenarios + profiles, text mode (voice optional), recording, deterministic checks, parallel, cost, SQLite results, `report`, UI, `doctor`, exit codes, standalone install. No judge |
+| v0.1 | See "v0.1 build order": connection modes, `-h` everywhere, `agent add` that joins, scenarios + profiles, text mode (voice optional), recording, deterministic checks, parallel, cost, SQLite results, `report`, UI, `doctor`, exit codes, standalone install. No judge |
 | v0.2 | Local tester models, STT accuracy, judge (once designed) |
 | v0.3 | `generate`, repeat-N, `diff`, JUnit and GitHub Action, MCP server |
 | v0.4 | Perturbations, security pack, concurrency, SIP |
