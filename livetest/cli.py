@@ -115,7 +115,10 @@ def cmd_init(db: sqlite3.Connection, args: argparse.Namespace) -> int:
 def cmd_plugin_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     name = need(args.plugin, "Plugin name: ", "--plugin")
     url = args.base_url or llm.PRESETS.get(args.provider) or need(
-        None, f"Provider ({', '.join(llm.PRESETS)}) or your server's base URL: ", "--base-url")
+        None, f"Provider ({', '.join(llm.PRESETS)}) or a base URL, e.g.\n"
+              "  https://api.together.xyz/v1   any OpenAI-compatible API\n"
+              "  http://localhost:8000/v1      a server on your machine (vLLM; Ollama is http://localhost:11434/v1)\n"
+              "Provider or base URL: ", "--base-url")
     plugin = Plugin(name=name, kind=args.kind, base_url=llm.PRESETS.get(url, url),
                     model=need(args.model, "Model: ", "--model"))
     if taken := [p.name for _, p in store.rows(db, Plugin) if key_var(p.name) == key_var(name)]:
@@ -357,13 +360,15 @@ def main(argv: list[str] | None = None) -> int:
             "livetest plugin add                      # asks for everything",
             "livetest plugin add --plugin local-qwen --base-url http://localhost:8000/v1 --model Qwen/Qwen3.5-2B",
             "livetest plugin add --plugin my-groq --provider groq --model openai/gpt-oss-120b",
+            "livetest plugin add --plugin together --base-url https://api.together.xyz/v1 --model meta-llama/Llama-3.3-70B-Instruct-Turbo",
             description="Add a plugin: any OpenAI-compatible server. At a terminal it asks for the API key (hidden) and\n"
                         "saves it in .env next to the database, never in it; scripts set LIVETEST_KEY_<PLUGIN> instead.\n"
                         "Makes one streamed call first and saves nothing if that fails. The first of its kind is active.")
     p.add_argument("--plugin", help="its name")
     p.add_argument("--kind", choices=["llm"], default="llm", help="what it does (default: llm; stt and tts come later)")
     p.add_argument("--provider", choices=llm.PRESETS, help="fills in --base-url for a cloud provider")
-    p.add_argument("--base-url", metavar="URL", help="your server's OpenAI-compatible URL, e.g. http://localhost:11434/v1")
+    p.add_argument("--base-url", metavar="URL", help="any OpenAI-compatible URL: an API (https://api.together.xyz/v1) "
+                                                     "or your own server (http://localhost:8000/v1)")
     p.add_argument("--model", help="the model's name on that server")
     list_and_remove(actions, Plugin)
     actions.choices["list"].set_defaults(func=cmd_plugin_list)
