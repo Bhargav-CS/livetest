@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -48,6 +49,27 @@ MIGRATIONS = [
         plugin INTEGER NOT NULL REFERENCES plugins (id) ON DELETE CASCADE
     );
     """,
+    # 4. One row per test; everything that happened in it is an event, written as it arrives. Runs come in module 7.
+    """
+    CREATE TABLE results (
+        id          INTEGER PRIMARY KEY,
+        scenario    TEXT NOT NULL,  -- JSON, as it was when the test ran
+        profile     TEXT,           -- JSON; NULL = plain participant
+        room        TEXT NOT NULL,
+        status      TEXT NOT NULL DEFAULT 'running',  -- running | done | never_joined | no_session_host | error
+        ended       TEXT,           -- done: max_turns | max_minutes | agent_left; otherwise the error
+        started_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at TEXT
+    );
+    CREATE TABLE events (
+        result INTEGER NOT NULL REFERENCES results (id) ON DELETE CASCADE,
+        ts     REAL NOT NULL,  -- the tester's receive time (unix s), so it lines up with the recording
+        source TEXT NOT NULL,  -- agent (session host) | tester | log
+        type   TEXT NOT NULL,  -- the event's name; a log line's level
+        data   TEXT NOT NULL   -- JSON
+    );
+    CREATE INDEX events_by_result ON events (result, ts);
+    """,
 ]
 
 TABLES = {Agent: "agents", Profile: "profiles", Scenario: "scenarios", Plugin: "plugins"}
@@ -83,6 +105,36 @@ def use(conn: sqlite3.Connection, name: str) -> bool:
     with conn:
         return conn.execute("INSERT OR REPLACE INTO active_plugins (kind, plugin) "
                             "SELECT json_extract(data, '$.kind'), id FROM plugins WHERE name = ?", (name,)).rowcount > 0
+
+
+def start_result(conn: sqlite3.Connection, scenario: Scenario, profile: Profile | None, room: str) -> int:
+    with conn:
+        return conn.execute("INSERT INTO results (scenario, profile, room) VALUES (?, ?, ?)",
+                            (scenario.model_dump_json(), profile and profile.model_dump_json(), room)).lastrowid
+
+
+def event(conn: sqlite3.Connection, result: int, source: str, type: str, data, ts: float | None = None) -> None:
+    """Committed at once, so the UI and `run logs` see it live."""
+    with conn:
+        conn.execute("INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+                     (result, time.time() if ts is None else ts, source, type, json.dumps(data)))
+
+
+def finish_result(conn: sqlite3.Connection, result: int, status: str, ended: str | None) -> None:
+    with conn:
+        conn.execute("UPDATE results SET status = ?, ended = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                     (status, ended, result))
+
+
+def result(conn: sqlite3.Connection, result: int) -> dict:
+    cur = conn.execute("SELECT * FROM results WHERE id = ?", (result,))
+    return dict(zip([c[0] for c in cur.description], cur.fetchone()))
+
+
+def events(conn: sqlite3.Connection, result: int) -> list[tuple[str, str, object]]:
+    """(source, type, data) in the order they happened."""
+    found = conn.execute("SELECT source, type, data FROM events WHERE result = ? ORDER BY ts, rowid", (result,))
+    return [(source, t, json.loads(data)) for source, t, data in found]
 
 
 def active(conn: sqlite3.Connection) -> dict[str, Plugin]:

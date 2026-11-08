@@ -247,18 +247,19 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
 1. **End-to-end tests, with or without voice**
    - [x] Join as a standard participant with the dispatch inside the token, from a sandbox, endpoint, API key or raw token (`livetest/runtime/tokens.py`, `session.py`; live-tested on Cloud, self-hosted proven by probes)
    - [~] Voice mode: the tester's own STT, LLM and TTS (`dev/agent.py` does a fixed-duration conversation)
-   - [~] Text mode through the session host (`RemoteSession`: `update_io` plus `run`), 0.3 to 3.4 s per turn
-   - [ ] Fallback to `lk.chat` when the session host is off; transcript-only mode
+   - [x] Text mode through the session host (`RemoteSession`: `update_io` plus `run`), 0.3 to 3.4 s per turn; the tester LLM plays the scenario's goal and persona; ends on `max_turns` / `max_minutes` / the agent leaving (`livetest/runtime/runner.py`)
+   - Session host required, no `lk.chat` fallback: almost every metric comes from it (user, 2026-11-08). Without it the result is `no_session_host`
 2. **Bring your own keys**
    - [~] Any LiveKit STT/TTS plugin for the tester (Deepgram, ElevenLabs used so far)
    - [x] Tester LLM through any OpenAI-compatible `base_url` (vLLM, Ollama, private-ai, cloud providers), always streamed; many plugins, one active per kind (`livetest/platform/llm.py`, `plugin add|list|rm|use`)
    - [x] Keys asked by `plugin add` / `init` (UI Plugins tab with module 11), saved in `~/.livetest/.env`, env vars override; never in the DB (`livetest/platform/keys.py`)
 3. **Logs, traces and recordings for every test**
-   - [~] Session-host events: tool calls, state changes, usage, metrics, what the agent's STT heard
+   - [x] Session-host events: tool calls, state changes, usage, metrics, what the agent's STT heard; plus the agent's prompt, tools, session options and chat history, all written to `events` as they arrive (`runtime/runner.py`)
    - [~] Tool calls rebuilt as tester-side OTel spans with real durations
    - [~] Local stereo `.ogg` recording (channel 0 = agent, channel 1 = tester)
    - [~] Grafana panel playing the recording next to traces
-   - [ ] Every run stored in `~/.livetest/livetest.db` (SQLite), recordings next to it (see "Results, logs and the UI")
+   - [~] Every run stored in `~/.livetest/livetest.db` (SQLite), recordings next to it (see "Results, logs and the UI"): `results` + `events` done (module 5), `runs` with module 7
+   - [x] Log lines as `events` rows, tagged with their test through a `contextvar` (parallel-safe); console logging in `platform/logging.py` (`-v` with module 7)
    - [ ] `livetest report create`: one self-contained HTML per run or per test, recordings embedded
    - [ ] `livetest report gate`: user-defined CI rules (later)
    - [ ] Optional OTLP export (Grafana, Langfuse, etc.); not required for a first run
@@ -276,7 +277,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
    - [x] Scenario model: goal, persona, tags, `max_turns`, `max_minutes` (default 5), `expect` (tool_called / tool_not_called / no_tool_errors / latency) (`livetest/runtime/models.py`); evaluating them is module 6
    - [ ] Deterministic checks: tool called / not called (with args), text contains / regex, latency limits, turn limit, no tool errors, token/cost budget
    - [x] Profiles applied to every token: room metadata, participant metadata/attributes, dispatch metadata; tokens livetest didn't make are checked against the profile (`livetest/runtime/tokens.py`)
-   - [~] Reusable profiles in the DB done; what the agent actually saw, recorded in each result, not yet
+   - [x] Reusable profiles in the DB; what the agent actually saw recorded in each result (`seen` event: room metadata, the tester's metadata and attributes, the agent's attributes)
 
 6. **CLI usability**
    - [~] CLI standard (see "CLI standard"): grouped root help, help on bare groups, `remove`/`rm`, confirmation with `-y`, `--name` flags done; `--json` on `list` done; `-v` not yet
@@ -358,16 +359,15 @@ docs/              this plan and the research
 **One SQLite file per user:** `~/.livetest/livetest.db`. Recordings are files in `~/.livetest/recordings/`; the DB stores their paths, not blobs, so the UI can serve them with Range.
 
 ```
-runs     (id, started_at, finished_at, livetest_version, git_sha, argv, agent_sdk, agent_sdk_version)
-results  (id, run_id, scenario, attempt, mode, room, profile_json, seen_json, status, score,
-          judge_json, recording_path, recording_started_at, duration_ms, usage_json)
-events   (result_id, ts, source, type, data)   -- data is JSON: turns, session-host events, tool calls, check results
-logs     (result_id, ts, level, logger, message)
+runs     (id, started_at, finished_at, livetest_version, git_sha, argv, agent_sdk, agent_sdk_version)   -- module 7
+results  (id, scenario, profile, room, status, ended, started_at, finished_at)   -- built (module 5); run, attempt, mode,
+          recording_path, recording_started_at, ... join with the modules that need them
+events   (result, ts, source, type, data)   -- built; source agent | tester | log, data is JSON
 ```
 
-- **Few tables on purpose.** Turns, tool calls and metrics are all `events` rows; the UI and `report` query them with SQLite's `json_extract`.
+- **Few tables on purpose.** Turns, tool calls, metrics and log lines are all `events` rows (a log line: `source='log'`, its level in `type`; decided 2026-11-08, no `logs` table); the UI and `report` query them with SQLite's `json_extract`.
 - **`ts` is the tester's receive time,** so everything lines up with the recording. The agent's own clock is used only for durations (tool calls), since the two machines' clocks can differ.
-- **Logs:** a small `logging.Handler` writes livetest's logs, and LiveKit's Rust logs that reach Python logging, into `logs` (INFO and up; DEBUG with `-v`). The agent's server logs stay out of reach, since it's a black box. What the agent does send (`error` and `debug_message` events) lands in `events`.
+- **Logs:** a small `logging.Handler` writes livetest's logs, and LiveKit's Rust logs that reach Python logging, into `events` (INFO and up; DEBUG with `-v`). Lines outside a test, or from another thread, stay on the console. The agent's server logs stay out of reach, since it's a black box. What the agent does send (`error` and `debug_message` events) lands in `events`.
 - **`livetest report create`** writes one HTML file per run (or per test); see "CLI standard". CI gating comes later as `report gate` with user-defined rules.
 
 **`livetest ui`** (aiohttp, already installed with livekit-agents, bound to `127.0.0.1` only because results hold system prompts and recordings). **Design final 2026-11-08:** [LiveTest UI canvas](https://claude.ai/artifact/Ei4gStAX9gF5u3nvonpPJc). Dark only, styled like LiveKit's dashboard, brand "LiveTest".
@@ -413,7 +413,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | 2 | [x] | Plugins and keys: `plugin add\|list\|remove\|use` (LLM now; STT/TTS in 9), one active per kind, keys → `~/.livetest/.env`; OpenAI-compatible streaming LLM; `init` offers the first one; Groq out of user deps | `platform/{llm,keys}.py`, `runtime/{models,store}.py`, `cli.py` | pytest + one streamed call to private-ai | no |
 | 3 | [x] | Tokens: sandbox, endpoint, API key (per-agent keys in `.env`), raw token; profile applied to each; tokens livetest didn't make checked against the profile. `agent add` joins and waits for the agent before saving; `init` offers an agent, then an LLM | `runtime/tokens.py`, `runtime/session.py`, `cli.py` | pytest + deployed Baymax (Cloud) | yes |
 | 4 | — | ~~`agent probe`~~: dropped (user, 2026-11-08). Joining moved into `agent add` (module 3); reading prompt / tools / session options moves into the run (module 5) | | | |
-| 5 | [ ] | One text-mode test: tester LLM drives `RemoteSession`; reads and records the agent's prompt / tools / session options; ends on max_turns / max_minutes / agent ends; results, events, logs written live | `runtime/runner.py`, `runtime/store.py` | self-hosted stub agent | yes |
+| 5 | [x] | One text-mode test: tester LLM drives `RemoteSession`; reads and records the agent's prompt / tools / session options; ends on max_turns / max_minutes / agent ends; results, events, logs written live | `runtime/runner.py`, `runtime/store.py`, `runtime/session.py`, `platform/logging.py` | pytest + self-hosted stub agent (`tests/stub_agent.py`) | yes |
 | 6 | [ ] | Checks: built-ins (never joined, silent, loops) + user-set (tool checks with expected vs actual, latency p95/p99, finish within N min) | `runtime/checks.py` | pytest on saved event dumps | no |
 | 7 | [ ] | `run start\|list\|logs\|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop, `--json`, exit codes | `cli.py`, `runtime/runner.py` | pytest + self-hosted | yes |
 | 8 | [ ] | Usage and cost: agent cost and test cost from a built-in price table | `runtime/cost.py` | pytest on saved usage | no |
@@ -423,7 +423,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | 12 | [ ] | `livetest doctor` | `cli.py` | pytest | partly |
 | 13 | [ ] | Install scripts (sh / iex via `uv tool install`); upgrading = re-running them, which stops the background UI first | `install.sh`, `install.ps1` | fresh install on Windows | no |
 
-- **Open before module 5:** the session-host-off fallback (`lk.chat`): in v0.1 or later? (asked 2026-11-08, no answer yet)
+- **Decided before module 5:** no session-host-off fallback (`lk.chat`); the session host is required (user, 2026-11-08).
 - **Assumed, confirm before module 11:** the UI ships in v0.1 (the live-view decisions point that way; the old roadmap had it in v0.2).
 
 ## Roadmap (proposed)
@@ -439,7 +439,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 
 - **The session host is an internal module** (`livekit.agents.voice.remote_session`).
   - Pin the supported livekit-agents versions.
-  - If an agent runs with `session_host=False`, fall back to transcript only.
+  - An agent with `session_host=False` gets `no_session_host`; there's no fallback (decided 2026-11-08).
 - **Live view must be verified before the UI commits to it** (user, 2026-11-08):
   - expected to work live: transcript, tool calls, agent/user state, usage (session-host events arrive as they happen; tool spans are rebuilt from them)
   - not proven: playing a recording while the test runs. The tester-side `RecorderIO` writes the `.ogg` and finalizes it on close, so the plan is audio after the test ends

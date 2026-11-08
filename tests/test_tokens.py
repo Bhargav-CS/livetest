@@ -20,7 +20,7 @@ import pytest
 from google.protobuf.json_format import ParseDict
 from livekit import api
 
-from livetest.runtime import tokens
+from livetest.runtime import session, tokens
 from livetest.runtime.models import Agent, Profile, key_var
 
 KEY, SECRET = "devkey", "a-test-secret-long-enough-for-hs256"
@@ -160,25 +160,11 @@ cloud = pytest.mark.skipif(not (LK_URL and LK_KEY and LK_SECRET), reason="needs 
 
 def joins(url, token):
     """Join, wait for the agent the token dispatched, and return what the room shows the tester."""
-    from livekit import rtc
-
     async def go():
-        room = rtc.Room()
-        agent = asyncio.get_running_loop().create_future()
-        room.on("participant_connected",
-                lambda p: p.kind == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT and not agent.done() and agent.set_result(p))
-        await room.connect(url, token)
-        try:
-            if any(p.kind == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT for p in room.remote_participants.values()):
-                agent.set_result(None)
-            await asyncio.wait_for(agent, 30)
+        # With the key the room is deleted after, which ends the agent's job now (Cloud caps concurrent jobs).
+        async with session.joined(url, token, LK_KEY, LK_SECRET) as (room, _):
             me = room.local_participant
             return json.loads(room.metadata), json.loads(me.metadata), dict(me.attributes)
-        finally:
-            await room.disconnect()
-            if LK_KEY:  # ends the agent's job now: Cloud caps concurrent jobs (5 on Alive's plan)
-                async with api.LiveKitAPI(LK_URL.replace("ws", "http", 1), LK_KEY, LK_SECRET) as lk:
-                    await lk.room.delete_room(api.DeleteRoomRequest(room=room.name))
 
     return asyncio.run(go())
 

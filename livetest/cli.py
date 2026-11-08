@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from livetest.platform import keys, llm
+from livetest.platform import keys, llm, logging
 from livetest.platform.db import DEFAULT_PATH
 from livetest.runtime import session, store, tokens
 from livetest.runtime.models import Agent, Participant, Plugin, Profile, Scenario, key_var
@@ -429,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.func is None:
         args.help_of.print_help()
         return 0
+    logging.setup()  # -v comes with `run` (module 7)
     try:
         with closing(store.connect(args.db)) as db:
             return args.func(db, args)
