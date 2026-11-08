@@ -645,31 +645,31 @@ name = "livetest"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "livekit-agents", extra = ["deepgram", "elevenlabs", "openai", "silero"] },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
+    { name = "livekit-agents", extra = ["openai"] },
     { name = "pydantic" },
     { name = "python-dotenv" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "livekit-agents", extra = ["groq"] },
+    { name = "livekit-agents", extra = ["deepgram", "elevenlabs", "groq", "silero"] },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "livekit-agents", extras = ["silero", "deepgram", "elevenlabs", "openai"], specifier = "==1.7.1" },
-    { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.39.1" },
-    { name = "opentelemetry-sdk", specifier = "==1.39.1" },
+    { name = "livekit-agents", extras = ["openai"], specifier = "==1.7.1" },
     { name = "pydantic", specifier = "==2.14.3" },
     { name = "python-dotenv", specifier = "==1.2.3" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "livekit-agents", extras = ["groq"], specifier = "==1.7.1" },
+    { name = "livekit-agents", extras = ["groq", "silero", "deepgram", "elevenlabs"], specifier = "==1.7.1" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.39.1" },
+    { name = "opentelemetry-sdk", specifier = "==1.39.1" },
     { name = "pytest", specifier = "==9.2.0" },
 ]
 

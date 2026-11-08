@@ -12,7 +12,7 @@ from livekit.agents import Agent, AgentSession, room_io, utils
 from livekit.plugins import deepgram, elevenlabs, silero, groq
 import logging
 
-from livetest.integrations.otel import setup_telemetry
+from otel import setup_telemetry  # dev/otel.py, next to this file
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)

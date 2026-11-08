@@ -113,20 +113,22 @@ def save(db: sqlite3.Connection, model) -> int:
 def cmd_init(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     # connect() in main() already created the DB; init is the friendly first step that says so.
     print(f"livetest is set up: {args.db}")
-    for what, why, missing, add, see, flags in (  # the agent first: it's what you came to test
-        ("agent", "the one you test", lambda: not store.rows(db, Agent), cmd_agent_add, "agent add -h",
-         dict(name=None, sandbox=None, endpoint=None, url=None)),
-        ("tester LLM", "the model that plays the user", lambda: "llm" not in store.active(db), cmd_plugin_add,
-         "plugin add -h", dict(plugin=None, kind="llm", provider=None, base_url=None, model=None)),
-    ):
-        if not missing():
-            continue
-        if not sys.stdin.isatty():
-            print(f"no {what} yet; see: livetest {see}")
-        elif ask(f"No {what} yet ({why}). Add one now? [Y/n] ").lower() in ("", "y", "yes"):
-            if code := add(db, argparse.Namespace(**vars(args), **flags)):
-                return code
+    # The agent first: it's what you came to test.
+    if not store.rows(db, Agent) and offer("agent", "the one you test", "agent add -h"):
+        if code := cmd_agent_add(db, argparse.Namespace(**vars(args), name=None, sandbox=None, endpoint=None, url=None)):
+            return code
+    if "llm" not in store.active(db) and offer("tester LLM", "the model that plays the user", "plugin add -h"):
+        return cmd_plugin_add(db, argparse.Namespace(**vars(args), plugin=None, kind="llm", provider=None,
+                                                     base_url=None, model=None))
     return 0
+
+
+def offer(what: str, why: str, see: str) -> bool:
+    """Ask a person whether to add a missing thing now; scripts are told where to look instead."""
+    if sys.stdin.isatty():
+        return ask(f"No {what} yet ({why}). Add one now? [Y/n] ").lower() in ("", "y", "yes")
+    print(f"no {what} yet; see: livetest {see}")
+    return False
 
 
 def cmd_plugin_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
