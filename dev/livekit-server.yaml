@@ -1,0 +1,25 @@
+# Self-hosted LiveKit server for agent.py - no LiveKit Cloud account.
+#
+#   podman kube play --replace dev/livekit-server.yaml
+#   podman kube down dev/livekit-server.yaml
+#
+# Same pattern as the services in D:\private-ai\private-ai (one Pod per component,
+# upstream image pinned by digest, no Containerfile).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: livekit-server
+spec:
+  restartPolicy: Always
+  # Host network so the server binds the podman machine's own interface and
+  # advertises that IP in its ICE candidates. With port mapping it would advertise
+  # the container IP (unreachable from Windows) unless --node-ip were hardcoded,
+  # and the machine IP changes on every machine restart.
+  hostNetwork: true
+  containers:
+    - name: livekit
+      # Pinned by digest, not :latest. This digest is livekit-server 1.13.11,
+      # pulled and verified working 2026-11-04.
+      image: docker.io/livekit/livekit-server@sha256:04668840140552c7e5d7faf28959cbf2256fb04ea641c4fd23ea69cbf3d7d105
+      # --dev: fixed creds devkey / secret, signalling 7880, ICE/TCP 7881, ICE/UDP 7882.
+      args: ["--dev", "--bind", "0.0.0.0"]
