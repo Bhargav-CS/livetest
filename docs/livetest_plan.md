@@ -274,8 +274,9 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
    - [x] `livetest init`: sets up the DB (UI serving comes with the UI)
    - [x] `livetest agent add/list/rm`: the agent's LiveKit `agent_name` plus how to get a token; one prompt picks sandbox / endpoint / URL; `add` joins and saves only if the agent came; per-agent keys in `.env` (`livetest/cli.py`)
    - [x] `livetest profile …` / `livetest scenario add|list|rm` in the DB, flags only; scenario numbers never reused; `PRAGMA user_version` migrations (`runtime/store.py`, `platform/db.py`)
-   - [x] Scenario model: goal, persona, tags, `max_turns`, `max_minutes` (default 5), `expect` (tool_called / tool_not_called / no_tool_errors / latency) (`livetest/runtime/models.py`); evaluating them is module 6
-   - [ ] Deterministic checks: tool called / not called (with args), text contains / regex, latency limits, turn limit, no tool errors, token/cost budget
+   - [x] Scenario model: goal, persona, tags, `max_turns`, `max_minutes` (default 5), `expect` (tool_called / tool_not_called / no_tool_errors / latency) (`livetest/runtime/models.py`); evaluated by `livetest/runtime/checks.py` (module 6)
+   - [x] Deterministic checks (`livetest/runtime/checks.py`): built-ins silent / loops (consecutive replies ≥ 90% alike; revisit in v0.2) / finished in time (hitting `max_minutes` fails); tool called / not called (args as a subset, exact values), no tool errors, reply latency p95/p99 (tester clock, `tester_turn` → next `AS_SPEAKING`, nearest rank). Outcomes and verdict on the result row (`passed`, `checks`). Never joined stays a status; checks run only on `done`
+   - [ ] More checks, from user feedback: text contains / regex, token/cost budget
    - [x] Profiles applied to every token: room metadata, participant metadata/attributes, dispatch metadata; tokens livetest didn't make are checked against the profile (`livetest/runtime/tokens.py`)
    - [x] Reusable profiles in the DB; what the agent actually saw recorded in each result (`seen` event: room metadata, the tester's metadata and attributes, the agent's attributes)
 
@@ -360,7 +361,7 @@ docs/              this plan and the research
 
 ```
 runs     (id, started_at, finished_at, livetest_version, git_sha, argv, agent_sdk, agent_sdk_version)   -- module 7
-results  (id, scenario, profile, room, status, ended, started_at, finished_at)   -- built (module 5); run, attempt, mode,
+results  (id, scenario, profile, room, status, ended, started_at, finished_at, passed, checks)   -- built (modules 5, 6); run, attempt, mode,
           recording_path, recording_started_at, ... join with the modules that need them
 events   (result, ts, source, type, data)   -- built; source agent | tester | log, data is JSON
 ```
@@ -368,6 +369,8 @@ events   (result, ts, source, type, data)   -- built; source agent | tester | lo
 - **Few tables on purpose.** Turns, tool calls, metrics and log lines are all `events` rows (a log line: `source='log'`, its level in `type`; decided 2026-11-08, no `logs` table); the UI and `report` query them with SQLite's `json_extract`.
 - **`ts` is the tester's receive time,** so everything lines up with the recording. The agent's own clock is used only for durations (tool calls), since the two machines' clocks can differ.
 - **Logs:** a small `logging.Handler` writes livetest's logs, and LiveKit's Rust logs that reach Python logging, into `events` (INFO and up; DEBUG with `-v`). Lines outside a test, or from another thread, stay on the console. The agent's server logs stay out of reach, since it's a black box. What the agent does send (`error` and `debug_message` events) lands in `events`.
+- **Agent errors are reported, not checked** (user, 2026-11-09): they never fail a test. The report and the UI show an error count per test and per run among the metrics, and each error's message on the test's timeline (problems lane) next to the turn it hit. First seen on Baymax: its LLM's 429 rate limit, which explained a 3.08 s reply.
+  - **Later (v0.2 or v0.3):** consider letting errors fail a test, e.g. an opt-in `no_agent_errors` check. See the roadmap.
 - **`livetest report create`** writes one HTML file per run (or per test); see "CLI standard". CI gating comes later as `report gate` with user-defined rules.
 
 **`livetest ui`** (aiohttp, already installed with livekit-agents, bound to `127.0.0.1` only because results hold system prompts and recordings). **Design final 2026-11-08:** [LiveTest UI canvas](https://claude.ai/artifact/Ei4gStAX9gF5u3nvonpPJc). Dark only, styled like LiveKit's dashboard, brand "LiveTest".
@@ -383,7 +386,7 @@ events   (result, ts, source, type, data)   -- built; source agent | tester | lo
   - usage strip in ms and tokens incl. cached
   - inspector, karaoke transcript, Copy as JSON
   - download this test's report
-- **R, the report file:** the same page, offline, for a whole run or one test: summary, problems, scenarios, test detail, traces, logs, agent info, profile sent.
+- **R, the report file:** the same page, offline, for a whole run or one test: summary (incl. agent error count), problems (incl. agent errors), scenarios, test detail, traces, logs, agent info, profile sent.
 - **Cost is two estimates:** the agent's own cost, and LiveTest's cost to run the test.
 - **Only what we measure:** no LLM judge (verdicts, root causes, fixes), no run-to-run comparisons, no known-issue tracking until they're designed.
 - **Live:** transcript, state, tool calls and usage stream in; the recording arrives when each test ends (v0.1).
@@ -414,7 +417,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | 3 | [x] | Tokens: sandbox, endpoint, API key (per-agent keys in `.env`), raw token; profile applied to each; tokens livetest didn't make checked against the profile. `agent add` joins and waits for the agent before saving; `init` offers an agent, then an LLM | `runtime/tokens.py`, `runtime/session.py`, `cli.py` | pytest + deployed Baymax (Cloud) | yes |
 | 4 | — | ~~`agent probe`~~: dropped (user, 2026-11-08). Joining moved into `agent add` (module 3); reading prompt / tools / session options moves into the run (module 5) | | | |
 | 5 | [x] | One text-mode test: tester LLM drives `RemoteSession`; reads and records the agent's prompt / tools / session options; ends on max_turns / max_minutes / agent ends; results, events, logs written live | `runtime/runner.py`, `runtime/store.py`, `runtime/session.py`, `platform/logging.py` | pytest + self-hosted stub agent (`tests/stub_agent.py`) | yes |
-| 6 | [ ] | Checks: built-ins (never joined, silent, loops) + user-set (tool checks with expected vs actual, latency p95/p99, finish within N min) | `runtime/checks.py` | pytest on saved event dumps | no |
+| 6 | [x] | Checks: built-ins (never joined, silent, loops) + user-set (tool checks with expected vs actual, latency p95/p99, finish within N min) | `runtime/checks.py` | pytest on saved event dumps | no |
 | 7 | [ ] | `run start\|list\|logs\|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop, `--json`, exit codes | `cli.py`, `runtime/runner.py` | pytest + self-hosted | yes |
 | 8 | [ ] | Usage and cost: agent cost and test cost from a built-in price table | `runtime/cost.py` | pytest on saved usage | no |
 | 9 | [ ] | Voice mode and recording (after the test ends) | `runtime/runner.py` | self-hosted, voice stub | yes |
@@ -431,7 +434,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | Version | Scope |
 |---|---|
 | v0.1 | See "v0.1 build order": connection modes, `-h` everywhere, `agent add` that joins, scenarios + profiles, text mode (voice optional), recording, deterministic checks, parallel, cost, SQLite results, `report`, UI, `doctor`, exit codes, standalone install. No judge |
-| v0.2 | Local tester models, STT accuracy, judge (once designed) |
+| v0.2 | Local tester models, STT accuracy, judge (once designed); consider: agent errors failing a test (or v0.3), a better loop rule than 90% alike |
 | v0.3 | `generate`, repeat-N, `diff`, JUnit and GitHub Action, MCP server |
 | v0.4 | Perturbations, security pack, concurrency, SIP |
 

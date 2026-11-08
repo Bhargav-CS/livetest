@@ -15,7 +15,7 @@ import jwt
 from google.protobuf.json_format import MessageToDict
 
 from livetest.platform import llm
-from livetest.runtime import session, store
+from livetest.runtime import checks, session, store
 from livetest.runtime.models import Profile, Scenario
 
 log = logging.getLogger("livetest.runner")
@@ -73,7 +73,8 @@ async def run_text(db, scenario: Scenario, url: str, token: str, tester, profile
             log.exception("test failed")
             ended = str(e) or type(e).__name__
         finally:
-            store.finish_result(db, result, status, ended)
+            outcomes = checks.evaluate(scenario, ended, store.events(db, result)) if status == "done" else None
+            store.finish_result(db, result, status, ended, outcomes)
     return result
 
 

@@ -1,0 +1,370 @@
+[
+ [
+  1794164681.2042117,
+  "agent",
+  "conversation_item_added",
+  {
+   "created_at": "2026-11-08T19:04:41.036635904Z",
+   "conversation_item_added": {
+    "item": {
+     "agent_handoff": {
+      "id": "item_d24d6d925bcd",
+      "new_agent_id": "stub",
+      "created_at": "2026-11-08T19:04:41.036072704Z"
+     }
+    }
+   }
+  }
+ ],
+ [
+  1794164681.2148244,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:41.149974016Z",
+   "agent_state_changed": {
+    "new_state": "AS_LISTENING"
+   }
+  }
+ ],
+ [
+  1794164681.8275974,
+  "tester",
+  "tester_turn",
+  {
+   "text": "hello"
+  }
+ ],
+ [
+  1794164681.8473551,
+  "agent",
+  "conversation_item_added",
+  {
+   "created_at": "2026-11-08T19:04:41.841892608Z",
+   "conversation_item_added": {
+    "item": {
+     "message": {
+      "id": "item_14cd830e98d0",
+      "role": "USER",
+      "content": [
+       {
+        "text": "hello"
+       }
+      ],
+      "metrics": {},
+      "created_at": "2026-11-08T19:04:41.840244224Z"
+     }
+    }
+   }
+  }
+ ],
+ [
+  1794164681.8499577,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:41.842000128Z",
+   "agent_state_changed": {
+    "old_state": "AS_LISTENING",
+    "new_state": "AS_THINKING"
+   }
+  }
+ ],
+ [
+  1794164682.1524065,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:42.142647296Z",
+   "agent_state_changed": {
+    "old_state": "AS_THINKING",
+    "new_state": "AS_SPEAKING"
+   }
+  }
+ ],
+ [
+  1794164682.1641045,
+  "agent",
+  "conversation_item_added",
+  {
+   "created_at": "2026-11-08T19:04:42.152505600Z",
+   "conversation_item_added": {
+    "item": {
+     "message": {
+      "id": "item_ee06be89c227",
+      "role": "ASSISTANT",
+      "content": [
+       {
+        "text": "Hello, this is a canned reply."
+       }
+      ],
+      "metrics": {
+       "started_speaking_at": "2026-11-08T19:04:42.142539008Z",
+       "stopped_speaking_at": "2026-11-08T19:04:42.152191744Z",
+       "llm_node_ttft": 0.30068699998082593
+      },
+      "created_at": "2026-11-08T19:04:41.842493696Z"
+     }
+    }
+   }
+  }
+ ],
+ [
+  1794164682.164763,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:42.152619008Z",
+   "agent_state_changed": {
+    "old_state": "AS_SPEAKING",
+    "new_state": "AS_LISTENING"
+   }
+  }
+ ],
+ [
+  1794164682.171218,
+  "tester",
+  "tester_turn",
+  {
+   "text": "please use the tool"
+  }
+ ],
+ [
+  1794164682.1819415,
+  "agent",
+  "conversation_item_added",
+  {
+   "created_at": "2026-11-08T19:04:42.176347904Z",
+   "conversation_item_added": {
+    "item": {
+     "message": {
+      "id": "item_0efd360f7950",
+      "role": "USER",
+      "content": [
+       {
+        "text": "please use the tool"
+       }
+      ],
+      "metrics": {},
+      "created_at": "2026-11-08T19:04:42.174929152Z"
+     }
+    }
+   }
+  }
+ ],
+ [
+  1794164682.1854348,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:42.176433408Z",
+   "agent_state_changed": {
+    "old_state": "AS_LISTENING",
+    "new_state": "AS_THINKING"
+   }
+  }
+ ],
+ [
+  1794164682.4818783,
+  "agent",
+  "tool_execution_updated",
+  {
+   "created_at": "2026-11-08T19:04:42.476929792Z",
+   "tool_execution_updated": {
+    "started": {
+     "function_call": {
+      "id": "item_534d9a5fe1d7/fnc_0",
+      "call_id": "call_5",
+      "arguments": "{}",
+      "name": "lookup"
+     }
+    }
+   }
+  }
+ ],
+ [
+  1794164683.9844084,
+  "agent",
+  "tool_execution_updated",
+  {
+   "created_at": "2026-11-08T19:04:43.979013888Z",
+   "tool_execution_updated": {
+    "ended": {
+     "id": "call_5",
+     "call_id": "call_5",
+     "message": "found it",
+     "status": "TC_DONE"
+    }
+   }
+  }
+ ],
+ [
+  1794164683.9949186,
+  "agent",
+  "function_tools_executed",
+  {
+   "created_at": "2026-11-08T19:04:43.979404032Z",
+   "function_tools_executed": {
+    "function_calls": [
+     {
+      "call_id": "call_5",
+      "arguments": "{}",
+      "name": "lookup"
+     }
+    ],
+    "function_call_outputs": [
+     {
+      "name": "lookup",
+      "call_id": "call_5",
+      "output": "found it"
+     }
+    ]
+   }
+  }
+ ],
+ [
+  1794164684.291856,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:44.283072Z",
+   "agent_state_changed": {
+    "old_state": "AS_THINKING",
+    "new_state": "AS_SPEAKING"
+   }
+  }
+ ],
+ [
+  1794164684.303425,
+  "agent",
+  "conversation_item_added",
+  {
+   "created_at": "2026-11-08T19:04:44.293108992Z",
+   "conversation_item_added": {
+    "item": {
+     "message": {
+      "id": "item_17e9194493e5",
+      "role": "ASSISTANT",
+      "content": [
+       {
+        "text": "Done, I found it."
+       }
+      ],
+      "metrics": {
+       "started_speaking_at": "2026-11-08T19:04:44.282953728Z",
+       "stopped_speaking_at": "2026-11-08T19:04:44.292793344Z",
+       "llm_node_ttft": 0.30164229997899383
+      },
+      "created_at": "2026-11-08T19:04:43.981537024Z"
+     }
+    }
+   }
+  }
+ ],
+ [
+  1794164684.304406,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:44.293200896Z",
+   "agent_state_changed": {
+    "old_state": "AS_SPEAKING",
+    "new_state": "AS_LISTENING"
+   }
+  }
+ ],
+ [
+  1794164684.309833,
+  "tester",
+  "tester_turn",
+  {
+   "text": "thanks"
+  }
+ ],
+ [
+  1794164684.3181734,
+  "agent",
+  "conversation_item_added",
+  {
+   "created_at": "2026-11-08T19:04:44.314023936Z",
+   "conversation_item_added": {
+    "item": {
+     "message": {
+      "id": "item_3896def42e76",
+      "role": "USER",
+      "content": [
+       {
+        "text": "thanks"
+       }
+      ],
+      "metrics": {},
+      "created_at": "2026-11-08T19:04:44.312734720Z"
+     }
+    }
+   }
+  }
+ ],
+ [
+  1794164684.321286,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:44.314093312Z",
+   "agent_state_changed": {
+    "old_state": "AS_LISTENING",
+    "new_state": "AS_THINKING"
+   }
+  }
+ ],
+ [
+  1794164684.625048,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:44.615569920Z",
+   "agent_state_changed": {
+    "old_state": "AS_THINKING",
+    "new_state": "AS_SPEAKING"
+   }
+  }
+ ],
+ [
+  1794164684.6356454,
+  "agent",
+  "conversation_item_added",
+  {
+   "created_at": "2026-11-08T19:04:44.624544Z",
+   "conversation_item_added": {
+    "item": {
+     "message": {
+      "id": "item_eb5282a4c189",
+      "role": "ASSISTANT",
+      "content": [
+       {
+        "text": "Hello, this is a canned reply."
+       }
+      ],
+      "metrics": {
+       "started_speaking_at": "2026-11-08T19:04:44.615460096Z",
+       "stopped_speaking_at": "2026-11-08T19:04:44.624297984Z",
+       "llm_node_ttft": 0.30149849998997524
+      },
+      "created_at": "2026-11-08T19:04:44.314416384Z"
+     }
+    }
+   }
+  }
+ ],
+ [
+  1794164684.6362507,
+  "agent",
+  "agent_state_changed",
+  {
+   "created_at": "2026-11-08T19:04:44.624641792Z",
+   "agent_state_changed": {
+    "old_state": "AS_SPEAKING",
+    "new_state": "AS_LISTENING"
+   }
+  }
+ ]
+]
