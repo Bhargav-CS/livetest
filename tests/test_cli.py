@@ -372,10 +372,27 @@ def finishes(monkeypatch, *outcomes):
         seen.append(parallel)
         for (result, _, room), (status, passed) in zip(tests, outcomes):
             assert room.startswith("livetest-") and store.begin(db, result)
-            store.finish_result(db, result, status, "max_turns", None if passed is None else [{"check": "c", "passed": passed}])
+            store.finish_result(db, result, status, "max_turns", None if passed is None else [{"check": "c", "passed": passed}],
+                                USAGE)
 
     monkeypatch.setattr(runner, "run", fake)
     return seen
+
+
+USAGE = {"agent": [{"kind": "llm", "provider": "api.groq.com", "model": "m", "input_tokens": 900, "input_cached_tokens": 512,
+                    "output_tokens": 40}, {"kind": "stt", "provider": "Deepgram", "model": "nova-3", "audio_duration": 2.5}],
+         "tester": [{"kind": "llm", "provider": "x", "model": "m", "input_tokens": 250, "input_cached_tokens": 0, "output_tokens": 12}]}
+
+
+def test_run_shows_usage(run, ready, monkeypatch, capsys):
+    """Counts, no cost: each test's LLM tokens, then the run's totals; every model's counts in --json."""
+    finishes(monkeypatch, ("done", True), ("done", True))
+    capsys.readouterr()
+    assert run("run", "start", "--name", "bot", "--scenario", "1-2", "-y") == 0
+    out = capsys.readouterr().out
+    assert out.count("tokens agent 900 in (512 cached) / 40 out, tester 250 in / 12 out") == 2
+    assert "tokens agent 1800 in (1024 cached) / 80 out, tester 500 in / 24 out" in out
+    assert json.loads(listed(run, capsys, "--run", "latest")[0]["usage"]) == USAGE
 
 
 def listed(run, capsys, *flags):

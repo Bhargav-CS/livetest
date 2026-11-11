@@ -72,13 +72,36 @@ def test_max_minutes_fails():
     assert not run(ended="max_minutes")["finished_in_time"]["passed"]
 
 
+def test_usage():
+    """Counts only. The agent's usage is cumulative, so its last event wins; the tester's turns add up."""
+    def used(*models):
+        return {"session_usage_updated": {"usage": {"model_usage": list(models)}}}
+
+    llm = {"provider": "api.groq.com", "model": "m", "input_tokens": 900, "input_cached_tokens": 512, "output_tokens": 40}
+    stt = {"provider": "Deepgram", "model": "nova-3", "audio_duration": 2.5}
+    events = [
+        (1, "agent", "session_usage_updated", used({"stt": {"provider": "Deepgram", "model": "nova-3"}})),
+        (2, "tester", "tester_turn", {"text": "hi", "usage": {"input_tokens": 100, "input_cached_tokens": 0, "output_tokens": 5}}),
+        (3, "agent", "session_usage_updated", used({"llm": llm}, {"stt": stt})),
+        (4, "tester", "tester_turn", {"text": "bye", "usage": {"input_tokens": 150, "input_cached_tokens": 100, "output_tokens": 7}}),
+        (5, "tester", "tester_turn", {"text": "a server that reports no usage"}),
+    ]
+    assert checks.usage(events, "127.0.0.1:8000", "qwen") == {
+        "agent": [{"kind": "llm", **llm}, {"kind": "stt", **stt}],
+        "tester": [{"kind": "llm", "provider": "127.0.0.1:8000", "model": "qwen",
+                    "input_tokens": 250, "input_cached_tokens": 100, "output_tokens": 12}]}
+    # The stub runs no model and the dump's tester reported none: nothing used, nothing made up.
+    assert checks.usage(EVENTS, "p", "m") == {"agent": [], "tester": []}
+
+
 def test_verdict_stored(tmp_path):
     db = store.connect(tmp_path / "t.db")
     s = Scenario(name="s", goal="g")
     a, b, c = store.start_run(db, "r", "agent", None, [(s, "r")] * 3)
     store.finish_result(db, a, "done", "max_turns", [{"check": "x", "passed": True}])
     store.finish_result(db, b, "done", "max_minutes", [{"check": "x", "passed": True}, {"check": "y", "passed": False}])
-    store.finish_result(db, c, "never_joined", "no agent")
+    store.finish_result(db, c, "never_joined", "no agent", None, {"agent": [], "tester": []})
     got = [(store.result(db, n)["passed"], store.result(db, n)["checks"]) for n in (a, b, c)]
     assert got == [(1, '[{"check": "x", "passed": true}]'), (0, got[1][1]), (None, None)]
+    assert [store.result(db, n)["usage"] for n in (a, c)] == [None, '{"agent": [], "tester": []}']  # unchecked tests too
     db.close()

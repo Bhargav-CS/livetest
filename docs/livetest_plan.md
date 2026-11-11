@@ -143,7 +143,7 @@ livetest report create --run latest --output ~/Desktop/nightly.html
 
 - Its own group, not under `run`: a report reads a finished run and runs nothing. Later actions go here, e.g. `report gate --rules <file>`, a CI gate whose thresholds each org defines.
 - **One self-contained HTML file** (works offline, no CDN), written to the current directory unless `--output` says otherwise. It holds everything livetest collected:
-  - summary: agent, profile, mode, pass rate, latency, tokens and cost
+  - summary: agent, profile, mode, pass rate, latency, usage (tokens incl. cached, audio seconds, characters)
   - per test: transcript with tool calls inline, checks, judge verdict and root cause, per-turn metrics, trace timeline, logs, recording with a player synced to the transcript
   - what the agent showed: prompt, tools, session options; the profile asked for vs what the agent saw
 - **Recordings are embedded** whenever the run recorded them. A big voice run gives a big file; that's local storage the user controls.
@@ -199,7 +199,7 @@ The model shape, as stored in the DB and accepted by the CLI and UI. The UI's fo
 - **How a test ends:** `max_turns`, `max_minutes`, the agent ending the session, or the user pressing **Stop** (on one test or the whole run). Stop ends the conversation cleanly and keeps everything recorded so far; the result is marked **"stopped by user"**, with no pass or fail.
 - **Tester's LLM / STT / TTS:** any OpenAI-compatible endpoint, with the user's own keys. Locally hosted models come in v0.2.
 - **Mode:** text is the default; voice is an option in v0.1.
-- **Cost stays:** the agent's session usage names each model and provider, with LLM tokens (incl. cached), STT audio seconds and TTS characters (see the research doc). LiveTest prices them from a built-in table. Unknown or self-hosted models show their usage with no cost.
+- **Usage, not cost (user, 2026-11-12):** the agent's session usage names each model and provider, with LLM tokens (incl. cached), STT audio seconds and TTS characters (see the research doc); the tester's LLM reports its tokens too. LiveTest records and shows both, and prices nothing: with any OpenAI-compatible model allowed, a built-in price table can't keep up, so users work out cost themselves. Cost (a price table, user-set prices) is for a later version.
 
 - A scenario belongs to no agent and has no profile: the run picks both. It has a global number for `run start` selections; `tags` group scenarios when several agents are tested (`scenario list --tag booking`).
 - `expect` entries carry a `type` field (a tagged union), so the schema can say exactly which fields each check takes. They're cheap, deterministic, and run before the judge.
@@ -262,6 +262,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
    - [x] Keys asked by `plugin add` / `init` (UI Plugins tab with module 11), saved in `~/.livetest/.env`, env vars override; never in the DB (`livetest/platform/keys.py`)
 3. **Logs, traces and recordings for every test**
    - [x] Session-host events: tool calls, state changes, usage, metrics, what the agent's STT heard; plus the agent's prompt, tools, session options and chat history, all written to `events` as they arrive (`runtime/runner.py`)
+   - [x] Usage per test, counts only (no cost in v0.1): the agent's models from its last `session_usage_updated` (cumulative), the tester's LLM tokens summed over its turns; saved as `results.usage` for every status, LLM tokens on each verdict line and the run total, everything in `--json` (`runtime/checks.py` `usage`, module 8)
    - [~] Tool calls rebuilt as tester-side OTel spans with real durations
    - [~] Local stereo `.ogg` recording (channel 0 = agent, channel 1 = tester)
    - [~] Grafana panel playing the recording next to traces
@@ -284,7 +285,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
    - [x] `livetest profile …` / `livetest scenario add|list|rm` in the DB, flags only; scenario numbers never reused; `PRAGMA user_version` migrations (`runtime/store.py`, `platform/db.py`)
    - [x] Scenario model: goal, persona, tags, `max_turns`, `max_minutes` (default 5), `expect` (tool_called / tool_not_called / no_tool_errors / latency) (`livetest/runtime/models.py`); evaluated by `livetest/runtime/checks.py` (module 6)
    - [x] Deterministic checks (`livetest/runtime/checks.py`): built-ins silent / loops (consecutive replies ≥ 90% alike; revisit in v0.2) / finished in time (hitting `max_minutes` fails); tool called / not called (args as a subset, exact values), no tool errors, reply latency p95/p99 (tester clock, `tester_turn` → next `AS_SPEAKING`, nearest rank). Outcomes and verdict on the result row (`passed`, `checks`). Never joined stays a status; checks run only on `done`
-   - [ ] More checks, from user feedback: text contains / regex, token/cost budget
+   - [ ] More checks, from user feedback: text contains / regex, token budget
    - [x] Profiles applied to every token: room metadata, participant metadata/attributes, dispatch metadata; tokens livetest didn't make are checked against the profile (`livetest/runtime/tokens.py`)
    - [x] Reusable profiles in the DB; what the agent actually saw recorded in each result (`seen` event: room metadata, the tester's metadata and attributes, the agent's attributes)
 
@@ -349,7 +350,7 @@ Only `livetest/` ships to users (the wheel holds nothing else). The rest of the 
 ```
 livetest/
 ├── platform/      what livetest needs to run, kept generic: db.py, keys.py, llm.py; stt.py, tts.py, logging.py (empty: where they go)
-├── runtime/       what livetest does: models.py, store.py, tokens.py, session.py; later runner, checks, cost
+├── runtime/       what livetest does: models.py, store.py, tokens.py, session.py; runner, checks
 ├── integrations/  optional extras, switched on by the entry point: otel.py (empty: where OTLP export to Grafana / Langfuse goes)
 ├── ui/            entry point: server.py (aiohttp + JSON API), static/ (the one page), report.py (that page with data baked in)
 └── cli.py         entry point
@@ -395,7 +396,7 @@ events   (result, ts, source, type, data)   -- built; source agent | tester | lo
   - inspector, karaoke transcript, Copy as JSON
   - download this test's report
 - **R, the report file:** the same page, offline, for a whole run or one test: summary (incl. agent error count), problems (incl. agent errors), scenarios, test detail, traces, logs, agent info, profile sent.
-- **Cost is two estimates:** the agent's own cost, and LiveTest's cost to run the test.
+- **Usage is two sets:** the agent's own (its session usage) and LiveTest's to run the test (the tester's models). Shown as counts, no cost (later version).
 - **Only what we measure:** no LLM judge (verdicts, root causes, fixes), no run-to-run comparisons, no known-issue tracking until they're designed.
 - **Live:** transcript, state, tool calls and usage stream in; the recording arrives when each test ends (v0.1).
 - **JSON API** (`/api/runs`, `/api/results/<id>`, `/api/results/<id>/events`): the same data the page uses.
@@ -427,7 +428,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | 5 | [x] | One text-mode test: tester LLM drives `RemoteSession`; reads and records the agent's prompt / tools / session options; ends on max_turns / max_minutes / agent ends; results, events, logs written live | `runtime/runner.py`, `runtime/store.py`, `runtime/session.py`, `platform/logging.py` | pytest + self-hosted stub agent (`tests/stub_agent.py`) | yes |
 | 6 | [x] | Checks: built-ins (never joined, silent, loops) + user-set (tool checks with expected vs actual, latency p95/p99, finish within N min) | `runtime/checks.py` | pytest on saved event dumps | no |
 | 7 | [x] | `run start\|list\|logs\|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop, `--json`, exit codes | `cli.py`, `runtime/runner.py` | pytest + self-hosted | yes |
-| 8 | [ ] | Usage and cost: agent cost and test cost from a built-in price table | `runtime/cost.py` | pytest on saved usage | no |
+| 8 | [x] | Usage: the agent's (its session usage) and the tester's (its LLM's tokens), saved on each result; no cost (user, 2026-11-12) | `runtime/checks.py`, `runtime/runner.py`, `runtime/store.py`, `platform/llm.py`, `cli.py` | pytest on saved usage | no |
 | 9 | [ ] | Voice mode and recording (after the test ends) | `runtime/runner.py` | self-hosted, voice stub | yes |
 | 10 | [ ] | `report create`: one offline HTML file | `ui/report.py`, `ui/static/` | open the file | no |
 | 11 | [ ] | `livetest ui`: aiohttp + JSON API + the A/C page | `ui/server.py`, `ui/static/` | browser | no |
@@ -441,8 +442,8 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 
 | Version | Scope |
 |---|---|
-| v0.1 | See "v0.1 build order": connection modes, `-h` everywhere, `agent add` that joins, scenarios + profiles, text mode (voice optional), recording, deterministic checks, parallel, cost, SQLite results, `report`, UI, `doctor`, exit codes, standalone install. No judge |
-| v0.2 | Local tester models, STT accuracy, judge (once designed); consider: agent errors failing a test (or v0.3), a better loop rule than 90% alike |
+| v0.1 | See "v0.1 build order": connection modes, `-h` everywhere, `agent add` that joins, scenarios + profiles, text mode (voice optional), recording, deterministic checks, parallel, usage, SQLite results, `report`, UI, `doctor`, exit codes, standalone install. No judge |
+| v0.2 | Local tester models, cost (price table and user-set prices, on top of saved usage), STT accuracy, judge (once designed); consider: agent errors failing a test (or v0.3), a better loop rule than 90% alike |
 | v0.3 | `generate`, repeat-N, `diff`, JUnit and GitHub Action, MCP server |
 | v0.4 | Perturbations, security pack, concurrency, SIP |
 

@@ -89,6 +89,8 @@ MIGRATIONS = [
     ALTER TABLE results ADD COLUMN run TEXT REFERENCES runs (id) ON DELETE CASCADE;
     ALTER TABLE results ADD COLUMN test INTEGER;  -- 1..N in its run
     """,
+    # 7. What a test used, as counts (no cost in v0.1): checks.usage's {"agent": [...], "tester": [...]}, JSON.
+    "ALTER TABLE results ADD COLUMN usage TEXT;",
 ]
 
 TABLES = {Agent: "agents", Profile: "profiles", Scenario: "scenarios", Plugin: "plugins"}
@@ -188,11 +190,12 @@ def event(conn: sqlite3.Connection, result: int, source: str, type: str, data, t
 
 
 def finish_result(conn: sqlite3.Connection, result: int, status: str, ended: str | None,
-                  checks: list[dict] | None = None) -> None:
+                  checks: list[dict] | None = None, usage: dict | None = None) -> None:
     passed, checks = (None, None) if checks is None else (all(c["passed"] for c in checks), json.dumps(checks))
     with conn:
-        conn.execute("UPDATE results SET status = ?, ended = ?, passed = ?, checks = ?, finished_at = CURRENT_TIMESTAMP "
-                     "WHERE id = ?", (status, ended, passed, checks, result))
+        conn.execute("UPDATE results SET status = ?, ended = ?, passed = ?, checks = ?, usage = ?, "
+                     "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                     (status, ended, passed, checks, usage and json.dumps(usage), result))
 
 
 def result(conn: sqlite3.Connection, result: int) -> dict:
