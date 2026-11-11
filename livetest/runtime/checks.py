@@ -1,4 +1,5 @@
-"""What a finished test is judged on: built-ins (silent, loops, finished in time) plus the scenario's `expect`.
+"""What a finished test is judged on: built-ins (silent, loops, finished in time) plus the scenario's `expect`; and what
+it used.
 
 Pure: reads a result's events, no LiveKit. Each outcome shows what was expected and what happened, passes too.
 """
@@ -19,6 +20,20 @@ def _args(text: str | None):
         return json.loads(text or "{}")
     except ValueError:  # the agent's LLM wrote bad JSON; show it as it came
         return text
+
+
+def usage(events, provider: str, model: str) -> dict:
+    """Counts, no cost: the agent's models from its last session usage (it's cumulative), each as {kind, provider,
+    model, ...counts as reported}; the tester's LLM (`provider`, `model`) summed over its turns. Nothing reported, nothing listed."""
+    agent, turns = [], []
+    for _, _, kind, data in events:
+        if kind == "session_usage_updated":
+            agent = [{"kind": k, **v} for m in data[kind].get("usage", {}).get("model_usage", []) for k, v in m.items()]
+        elif kind == "tester_turn" and "usage" in data:
+            turns.append(data["usage"])
+    tester = {"kind": "llm", "provider": provider, "model": model} | {
+        k: sum(t[k] for t in turns) for k in ("input_tokens", "input_cached_tokens", "output_tokens")}
+    return {"agent": agent, "tester": [tester] if turns else []}
 
 
 def evaluate(scenario: Scenario, ended: str, events) -> list[dict]:

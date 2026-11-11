@@ -302,7 +302,18 @@ def verdict(r: dict) -> str:
     failed = [c["check"] for c in json.loads(r["checks"] or "[]") if not c["passed"]]
     why = (", ".join(failed) or r["ended"] or "")[:200]  # an error's text can be a whole response body
     errors = f"  ({r['agent_errors']} agent errors)" if r["agent_errors"] else ""
-    return f"#{r['test']:<3} {json.loads(r['scenario'])['name']:<24} {outcome(r).upper():<16} {why}{errors}"
+    return f"#{r['test']:<3} {json.loads(r['scenario'])['name']:<24} {outcome(r).upper():<16} {why}{errors}{used([r])}"
+
+
+def used(results: list[dict]) -> str:
+    """LLM tokens summed over `results`, per side: '  tokens agent 900 in (512 cached) / 40 out, tester 250 in / 12 out'.
+    Counts only (no cost in v0.1); STT / TTS and per-model counts are in --json."""
+    parts = []
+    for side in ("agent", "tester"):
+        if rows := [x for r in results for x in json.loads(r["usage"] or "{}").get(side, []) if x["kind"] == "llm"]:
+            i, c, o = (sum(x.get(k, 0) for x in rows) for k in ("input_tokens", "input_cached_tokens", "output_tokens"))
+            parts.append(f"{side} {i} in{f' ({c} cached)' if c else ''} / {o} out")
+    return "  tokens " + ", ".join(parts) if parts else ""
 
 
 def run_line(r: dict) -> str:
@@ -396,7 +407,7 @@ def cmd_run_start(db: sqlite3.Connection, args: argparse.Namespace) -> int:
         store.stop(db, run)
     found = store.results(db, run)
     print("\n".join(map(verdict, found)))
-    print(f"run {run}: " + ", ".join(f"{n} {w}" for w, n in Counter(map(outcome, found)).items()))
+    print(f"run {run}: " + ", ".join(f"{n} {w}" for w, n in Counter(map(outcome, found)).items()) + used(found))
     if errored := [r["test"] for r in found if r["status"] == "error"]:
         print(f"test {', '.join(map(str, errored))} hit an error; see: livetest run logs --run {run} --test {errored[0]}\n"
               f"tracebacks are in {errors_file(args)}; if it looks like a livetest bug, report it with "

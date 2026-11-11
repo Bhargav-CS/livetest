@@ -19,12 +19,6 @@ def llm(base_url: str, model: str, key: str | None):
     return openai.LLM(base_url=base_url, model=model, api_key=key or "none")  # local servers take any key
 
 
-async def reply(client, ctx) -> str:
-    """One whole reply, collected from the stream."""
-    async with client.chat(chat_ctx=ctx) as stream:
-        return "".join([c.delta.content async for c in stream if c.delta and c.delta.content])
-
-
 async def check(base_url: str, model: str, key: str | None) -> float:
     """Seconds to the first streamed token. Raises ConnectionError saying why when it doesn't answer."""
     from livekit.agents import APIConnectOptions, APIError

@@ -53,7 +53,9 @@ def tester():
                 chunk = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "fake",
                          "choices": [{"index": 0, "delta": {"role": "assistant", "content": piece}, "finish_reason": None}]}
                 self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-            self.wfile.write(b"data: [DONE]\n\n")
+            usage = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "fake", "choices": [],
+                     "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}}  # include_usage's last chunk
+            self.wfile.write(f"data: {json.dumps(usage)}\n\ndata: [DONE]\n\n".encode())
 
         def log_message(self, *a):
             pass
@@ -160,7 +162,10 @@ def test_max_turns(db, stub, tester, caplog):
     info = of("agent_info")[0]
     assert "Stub agent" in info["instructions"] and "lookup" in json.dumps(info["tools"])
     assert len(of("tool_execution_updated")) == 2  # started, ended: the tool's real duration
-    # No session_usage_updated: the stub runs no model, so it has no usage (Baymax's probes show it).
+    # No session_usage_updated: the stub runs no model, so it has no usage (Baymax's probes show it). The tester's adds up.
+    assert of("tester_turn")[0]["usage"] == {"input_tokens": 10, "input_cached_tokens": 0, "output_tokens": 2}
+    assert json.loads(res["usage"]) == {"agent": [], "tester": [{"kind": "llm", "provider": tester.url.split("/")[2],
+                                        "model": "fake", "input_tokens": 30, "input_cached_tokens": 0, "output_tokens": 6}]}
     assert {"framework", "session_state", "chat_history", "seen", "conversation_item_added"} <= {t for _, _, t, _ in evs}
     assert any(src == "log" for _, src, _, _ in evs)
     # The agent's replies reach the tester as the other side of its conversation.

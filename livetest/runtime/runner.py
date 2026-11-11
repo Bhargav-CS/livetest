@@ -16,7 +16,6 @@ from typing import get_args
 from google.protobuf.json_format import MessageToDict
 from livekit.protocol.agent_pb import agent_session as pb
 
-from livetest.platform import llm
 from livetest.runtime import checks, session, store
 from livetest.runtime.models import Scenario
 
@@ -125,8 +124,10 @@ async def run_text(db, result: int, scenario: Scenario, room: str, connect, test
             log.exception("test failed", extra={"console": False})  # traceback in errors.log; the summary says so
             ended = str(e) or type(e).__name__
         finally:
-            outcomes = checks.evaluate(scenario, ended, store.events(db, result)) if status == "done" else None
-            store.finish_result(db, result, status, ended, outcomes)
+            events = store.events(db, result)
+            outcomes = checks.evaluate(scenario, ended, events) if status == "done" else None
+            # Every status: a stopped or failed test still used tokens.
+            store.finish_result(db, result, status, ended, outcomes, checks.usage(events, tester.provider, tester.model))
 
 
 async def _stopping(db, result: int) -> None:
@@ -198,8 +199,11 @@ async def _converse(db, result: int, room, agent, scenario: Scenario, tester) ->
 async def _turns(db, result: int, remote, tester, ctx, n: int, speaking: asyncio.Event) -> str:
     """How the conversation ended: max_turns, or no_reply once the agent doesn't start a reply within REPLY_S."""
     for _ in range(n):
-        line = await llm.reply(tester, ctx)
-        store.event(db, result, "tester", "tester_turn", {"text": line})
+        said = await tester.chat(chat_ctx=ctx).collect()
+        line, u = said.text, said.usage  # usage: None from a server that doesn't report it
+        store.event(db, result, "tester", "tester_turn", {"text": line} | ({"usage": {
+            "input_tokens": u.prompt_tokens, "input_cached_tokens": u.prompt_cached_tokens,
+            "output_tokens": u.completion_tokens}} if u else {}))
         ctx.add_message(role="assistant", content=line)
         speaking.clear()
         run, spoke = asyncio.ensure_future(remote.run(line)), asyncio.ensure_future(speaking.wait())
