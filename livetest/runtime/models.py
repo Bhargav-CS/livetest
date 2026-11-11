@@ -13,7 +13,7 @@ Metadata = dict[str, Any] | str
 
 
 def _name(v: str) -> str:
-    # Same rule as run ids: names end up in selections (`7`, `1-20x10`), file names and URLs.
+    # Names end up in selections (`7`, `1-20x10`), file names and URLs; a leading letter keeps them apart from numbers.
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]{0,63}", v):
         raise ValueError(f"'{v}' isn't a valid name: start with a letter, then letters, digits, - _ . (up to 64)")
     return v

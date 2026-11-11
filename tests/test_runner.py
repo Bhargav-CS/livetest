@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -64,7 +65,7 @@ def tester():
         lines.extend(say)
         return llm.llm(f"http://127.0.0.1:{srv.server_port}/v1", "fake", None)
 
-    make.asked = asked
+    make.asked, make.url = asked, f"http://127.0.0.1:{srv.server_port}/v1"
     yield make
     srv.shutdown()
 
@@ -87,22 +88,50 @@ def stub(tmp_path_factory):
         p.wait(30)
 
 
+def connect(agent="livetest-stub"):
+    return lambda room: tokens.connect(Agent(name=agent, url=URL), room, key=KEY, secret=SECRET)
+
+
 def run(db, tester_llm, scenario, agent="livetest-stub"):
-    url, token = tokens.connect(Agent(name=agent, url=URL), f"livetest-{uuid.uuid4().hex[:8]}", key=KEY, secret=SECRET)
+    room = f"livetest-{uuid.uuid4().hex[:8]}"
+    n, = store.start_run(db, room, agent, None, [(scenario, room)])
 
     async def go():
         try:
-            return await runner.run_text(db, scenario, url, token, tester_llm, key=KEY, secret=SECRET)
+            await runner.run_text(db, n, scenario, room, connect(agent), tester_llm, KEY, SECRET)
         finally:
             await tester_llm.aclose()
 
-    n = asyncio.run(go())
+    asyncio.run(go())
     return store.result(db, n), store.events(db, n)
+
+
+def test_selection():
+    pool = [(n, Scenario(name=name, goal="g")) for n, name in [(1, "a"), (2, "b"), (4, "fix2"), (7, "all")]]
+    pick = lambda *items: [n for n, _ in runner.select(list(items), pool)]
+    assert pick("1") == [1] and pick("b") == [2]
+    assert pick("1-4") == [1, 2, 4]  # skips the removed 3
+    assert pick("b", "1-2x2") == [2, 1, 2, 1, 2]  # overlaps add up
+    assert pick("fix2") == [4] and pick("fix2x2") == [4, 4]  # a whole name is never split into name + xN
+    assert pick("all") == [1, 2, 4, 7] and pick("allx2") == [1, 2, 4, 7] * 2  # the keyword beats a scenario named all
+    for bad in ("3", "8-9", "nope", "1x0", "x2", "²"):
+        with pytest.raises(ValueError):
+            runner.select([bad], pool)
+
+
+def test_run_ids():
+    for ok in ("17", "nightly-1", "a.b_c"):
+        assert runner.run_id(ok) == ok
+    with pytest.raises(ValueError, match="nightly-1"):  # says what to use instead
+        runner.run_id("nightly 1")
+    for bad in ("", "x" * 65, "latest", "a/b"):
+        with pytest.raises(ValueError):
+            runner.run_id(bad)
 
 
 def test_logs_land_on_their_own_test(db):
     s = Scenario(name="s", goal="g")
-    a, b = store.start_result(db, s, None, "ra"), store.start_result(db, s, None, "rb")
+    a, b = store.start_run(db, "r", "agent", None, [(s, "ra"), (s, "rb")])
     log = logging.getLogger("livetest.test")
     log.setLevel(logging.INFO)
 
@@ -154,3 +183,86 @@ def test_max_minutes(db, stub, tester):
 def test_never_joined(db, tester):  # waits the full 30 s
     res, evs = run(db, tester(), Scenario(name="s", goal="g"), agent="nobody-livetest")
     assert res["status"] == "never_joined" and "never joined" in res["ended"]
+
+
+@selfhost
+def test_parallel_run_from_the_cli(tmp_path, stub, tester, monkeypatch, capsys):
+    from livetest.cli import main
+
+    monkeypatch.setenv("LIVETEST_AGENT_KEY_LIVETEST_STUB", KEY)
+    monkeypatch.setenv("LIVETEST_AGENT_SECRET_LIVETEST_STUB", SECRET)
+    cli = lambda *a: main(["--db", str(tmp_path / "t.db"), *a])
+    assert cli("agent", "add", "--name", "livetest-stub", "--url", URL) == 0
+    assert cli("plugin", "add", "--plugin", "fake", "--base-url", tester.url, "--model", "fake") == 0
+    for s in ("a", "b", "c"):  # one turn each: the stub's canned replies would count as a loop over two
+        assert cli("scenario", "add", "--scenario", s, "--goal", "g", "--max-turns", "1") == 0
+    assert cli("run", "start", "--name", "livetest-stub", "--scenario", "all", "--parallel", "2", "-y") == 0
+    capsys.readouterr()
+    assert cli("run", "list", "--json") == 0
+    assert {k: v for k, v in json.loads(capsys.readouterr().out)[0].items()
+            if k in ("id", "status", "tests", "passed")} == {"id": "1", "status": "done", "tests": 3, "passed": 3}
+
+
+@selfhost
+@pytest.mark.parametrize("line", ["please fail", "be slow"])
+def test_agent_doesnt_reply(db, stub, tester, line):
+    """The agent errors out of a turn, or takes over 10 s to start: the test ends there and fails; not a livetest error."""
+    res, _ = run(db, tester("hello", line, "anyone there?"), Scenario(name="s", goal="g", max_turns=3))
+    assert (res["status"], res["ended"], res["passed"]) == ("done", "no_reply", 0)
+    silent = next(c for c in json.loads(res["checks"]) if c["check"] == "silent")
+    assert silent["actual"] == [line]
+
+
+@selfhost
+def test_ctrl_c_stops_the_run(tmp_path, stub, tester, monkeypatch):
+    import _thread
+    import signal
+
+    from livetest.cli import main
+
+    monkeypatch.setenv("LIVETEST_AGENT_KEY_LIVETEST_STUB", KEY)
+    monkeypatch.setenv("LIVETEST_AGENT_SECRET_LIVETEST_STUB", SECRET)
+    path = tmp_path / "t.db"
+    cli = lambda *a: main(["--db", str(path), *a])
+    assert cli("agent", "add", "--name", "livetest-stub", "--url", URL) == 0
+    assert cli("plugin", "add", "--plugin", "fake", "--base-url", tester.url, "--model", "fake") == 0
+    assert cli("scenario", "add", "--scenario", "long", "--goal", "g", "--max-turns", "20") == 0
+    tester(*["please use the tool"] * 40)
+
+    def press_ctrl_c():  # once the first test is talking; the same signal a real Ctrl+C sends
+        with closing(store.connect(path)) as db:
+            while not store.run_events(db, "1"):
+                time.sleep(0.2)
+        time.sleep(1)
+        _thread.interrupt_main(signal.SIGINT)
+
+    threading.Thread(target=press_ctrl_c, daemon=True).start()
+    assert cli("run", "start", "--name", "livetest-stub", "--scenario", "longx2", "--parallel", "1", "-y") == 130
+    with closing(store.connect(path)) as db:
+        assert [r["status"] for r in store.results(db, "1")] == ["stopped", "stopped"]
+        assert store.runs(db, "1")[0]["status"] == "stopped"
+        assert store.events(db, store.results(db, "1")[0]["id"])  # kept what it recorded
+
+
+@selfhost
+def test_stop(db, stub, tester):
+    """Stopping a run: the running test ends cleanly and keeps its events; the queued one never starts."""
+    s = Scenario(name="s", goal="g", max_turns=20)
+    tests = [(s, f"livetest-{uuid.uuid4().hex[:8]}") for _ in range(2)]
+    first, second = store.start_run(db, "stop-me", "livetest-stub", None, tests)
+    tester_llm = tester(*["please use the tool"] * 20)
+
+    async def go():
+        going = asyncio.create_task(runner.run(db, [(first, s, tests[0][1]), (second, s, tests[1][1])],
+                                               connect(), tester_llm, 1, KEY, SECRET))
+        while not any(t == "tester_turn" for _, _, t, _ in store.events(db, first)):
+            await asyncio.sleep(0.2)
+        assert store.stop(db, "stop-me") == 2
+        await going
+        await tester_llm.aclose()
+
+    asyncio.run(go())
+    a, b = store.result(db, first), store.result(db, second)
+    assert (a["status"], a["passed"], b["status"]) == ("stopped", None, "stopped")
+    assert store.events(db, first) and not store.events(db, second)
+    assert store.runs(db, "stop-me")[0]["status"] == "stopped"

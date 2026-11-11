@@ -98,18 +98,25 @@ livetest report   create                             --run <run|latest> [--test 
 3. **Names are flags, never positional. `--name` always means the agent under test** (its LiveKit `agent_name`, as used in explicit dispatch), and appears only where an agent is involved: `agent …` and `run …`. Other things are named by a flag of their own, with the same meaning in every command: `--profile`, `--scenario`, `--plugin`, `--run` (a run's id, or `latest`; on `run start` it sets the new run's id), `--test` (one conversation in a run: one scenario × one repeat).
 4. **Help at every level, never an error:** a command or group typed without its action prints its help, exit 0, without touching the DB. Every help screen ends with copy-paste examples. Root help groups commands by purpose (`COMMANDS` in `cli.py`).
 5. **Prompt at a terminal, fail clearly in a script:** missing values are asked for at a terminal. In a script they fail and name the flag that fixes it. Destructive actions ask "are you sure?" at a terminal; scripts must pass `-y`.
-6. **Output:** plain text for people. `--json` on `list` and `run` for scripts, CI and AI tools (Claude will prefer the CLI). Errors go to stderr, start with `error:` and say what to do next. No tracebacks unless `-v`.
-7. **Exit codes:** `0` ok · `1` a test failed · `2` bad input or config · `3` couldn't connect or the agent never joined.
+6. **Output:** plain text for people. `--json` on `list` and `run` for scripts, CI and AI tools (Claude will prefer the CLI). Errors go to stderr, start with `error:` and say what to do next. No tracebacks unless `-v`: they always go to `~/.livetest/errors.log` (next to the DB, rotated at 1 MB), and the error message says where it is and where to report it (GitHub issues, with `livetest --version`).
+7. **Exit codes:** `0` ok · `1` a test failed (or errored) · `2` bad input or config · `3` couldn't connect or the agent never joined (incl. no session host). A run with mixed outcomes exits with the first that applies: 3, then 1, then 0; stopped tests count for neither. Ctrl+C: 130 (in `run start` it stops the run first).
 8. **Global flags:** `--db <file>` (default `~/.livetest/livetest.db`), `-v` (debug logs on the console), `--version`.
 
 **`run`**
 
 ```
-livetest run start --name my-agent --scenario 1-20x10 25-35x2 [--run ID] [--voice] [--profile P] [--parallel N] [--no-recordings] [-y]
-livetest run list                                # active and past runs: number, agent, progress, pass rate
-livetest run logs --run <run> [--test N] [--level]  # one timeline: turns, tool calls, states, log lines; follows while the run is live
-livetest run stop --run <run>
+livetest run start --name my-agent --scenario 1-20x10 25-35x2 [--run ID] [--voice] [--profile P] [--parallel N] [--llm NAME] [--token T] [--no-recordings] [-y]
+livetest run list [--run <run>]                  # active and past runs: id, agent, progress, pass rate; with --run, its tests and verdicts
+livetest run logs --run <run> [--test N] [--level L]  # one timeline: turns, tool calls, states, log lines; follows while the run is live
+livetest run stop --run <run> [--test N] [-y]
 ```
+
+- **A raw token runs one test** (it fixes the room): a bigger selection fails with the commands that save a token source for the agent (`agent rm`, then `agent add --sandbox | --endpoint | --url`).
+- **Stop** goes through the DB: `run stop` marks running tests `stopping` and queued ones `stopped`; each running test checks its row every second and ends cleanly, keeping what it recorded. The UI stops the same way, and so does Ctrl+C in `run start`. In `run logs` Ctrl+C only stops following.
+- **Later: `run start --detach`** (user, 2026-11-12): hands the run to a background livetest process and returns at once; `run logs` / `run list` / `run stop` work on it as they do now. Foreground stays the default, since CI needs the exit code. Runs started from the UI (module 11) already live in its server process.
+- **A run's status comes from its tests:** running while any is queued or running, then stopping, stopped (any stopped) or done.
+- **The agent must start each reply within 10 s** (`checks.REPLY_S`). Provider errors (4xx / 5xx) it retries past don't fail a test; they're counted per test (agent errors). A turn with no reply in time fails the built-in `silent` check and ends the test (`no_reply`).
+- **`run logs` labels the conversation** `tester:`, `agent_<name>:` and `agent_<name>_heard:` (what the agent took in: an echo in text mode, its STT in voice). Voice mode adds `tester_heard:` (the tester's STT), so both sides' word errors show.
 
 - `run start` needs `--name` and `--scenario`, so nothing runs by accident. `--scenario all` must be typed.
 - **Selection** (`--scenario` takes one or more items): each scenario has a global number (shown by `scenario list`, never reused after a remove). An item is `7`, `1-20`, a scenario name, or `all`; `xN` repeats it. Overlaps add up; ranges skip removed numbers.
@@ -124,7 +131,7 @@ livetest run stop --run <run>
 - **Run id:** `run start --run <id>` sets it; without it, livetest picks the next free number (`17`, `18`, …). `latest` always works.
   - Allowed: letters, digits, `-`, `_`, `.`, up to 64 characters, unique. It ends up in folder and file names and UI links, so anything else fails at once with a fix (`error: run id 'nightly 1' has a space; use nightly-1`).
   - Stored as `TEXT UNIQUE`: lookups take microseconds whatever the format, so the format is chosen for people, not speed.
-- **Live view:** every turn, tool call, state change and log line is written to the DB as it happens (WAL), so `run logs` and the UI read the same rows. The recording isn't live: it arrives when each test ends (v0.1). With `--parallel 1` the terminal shows the conversation live; above 1 it shows one line per conversation, and `run logs` or the UI follows a single one.
+- **Live view:** every turn, tool call, state change and log line is written to the DB as it happens (WAL), so `run logs` and the UI read the same rows. The recording isn't live: it arrives when each test ends (v0.1). `run start` prints only each test's verdict, at the end; `run logs` or the UI follows the conversations.
 
 **`report`**
 
@@ -258,8 +265,9 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
    - [~] Tool calls rebuilt as tester-side OTel spans with real durations
    - [~] Local stereo `.ogg` recording (channel 0 = agent, channel 1 = tester)
    - [~] Grafana panel playing the recording next to traces
-   - [~] Every run stored in `~/.livetest/livetest.db` (SQLite), recordings next to it (see "Results, logs and the UI"): `results` + `events` done (module 5), `runs` with module 7
-   - [x] Log lines as `events` rows, tagged with their test through a `contextvar` (parallel-safe); console logging in `platform/logging.py` (`-v` with module 7)
+   - [~] Every run stored in `~/.livetest/livetest.db` (SQLite), recordings next to it (see "Results, logs and the UI"): `runs` + `results` + `events` done (modules 5, 7); recordings with module 9
+   - [x] Log lines as `events` rows, tagged with their test through a `contextvar` (parallel-safe); console logging in `platform/logging.py`, `-v` global; tracebacks in `~/.livetest/errors.log` for bug reports (module 7)
+   - [x] `livetest run start|list|logs|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop (DB statuses), `--json`, exit codes, 10 s reply rule (`cli.py`, `runtime/runner.py`, `runtime/store.py`)
    - [ ] `livetest report create`: one self-contained HTML per run or per test, recordings embedded
    - [ ] `livetest report gate`: user-defined CI rules (later)
    - [ ] Optional OTLP export (Grafana, Langfuse, etc.); not required for a first run
@@ -281,7 +289,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
    - [x] Reusable profiles in the DB; what the agent actually saw recorded in each result (`seen` event: room metadata, the tester's metadata and attributes, the agent's attributes)
 
 6. **CLI usability**
-   - [~] CLI standard (see "CLI standard"): grouped root help, help on bare groups, `remove`/`rm`, confirmation with `-y`, `--name` flags done; `--json` on `list` done; `-v` not yet
+   - [x] CLI standard (see "CLI standard"): grouped root help, help on bare groups, `remove`/`rm`, confirmation with `-y`, `--name` flags, `--json` on `list` and `run logs`, global `-v`, exit codes
    - [ ] `livetest doctor`: finds and fixes common user issues (missing keys, bad token source, server unreachable), so users never debug at code level
 
 ### Extras, ranked by value
@@ -360,8 +368,8 @@ docs/              this plan and the research
 **One SQLite file per user:** `~/.livetest/livetest.db`. Recordings are files in `~/.livetest/recordings/`; the DB stores their paths, not blobs, so the UI can serve them with Range.
 
 ```
-runs     (id, started_at, finished_at, livetest_version, git_sha, argv, agent_sdk, agent_sdk_version)   -- module 7
-results  (id, scenario, profile, room, status, ended, started_at, finished_at, passed, checks)   -- built (modules 5, 6); run, attempt, mode,
+runs     (id, agent, profile, version, started_at)   -- built (module 7); status comes from its tests; the agent's SDK is in each test's framework event
+results  (id, scenario, profile, room, status, ended, started_at, finished_at, passed, checks, run, test)   -- built (modules 5-7); mode,
           recording_path, recording_started_at, ... join with the modules that need them
 events   (result, ts, source, type, data)   -- built; source agent | tester | log, data is JSON
 ```
@@ -418,7 +426,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | 4 | — | ~~`agent probe`~~: dropped (user, 2026-11-08). Joining moved into `agent add` (module 3); reading prompt / tools / session options moves into the run (module 5) | | | |
 | 5 | [x] | One text-mode test: tester LLM drives `RemoteSession`; reads and records the agent's prompt / tools / session options; ends on max_turns / max_minutes / agent ends; results, events, logs written live | `runtime/runner.py`, `runtime/store.py`, `runtime/session.py`, `platform/logging.py` | pytest + self-hosted stub agent (`tests/stub_agent.py`) | yes |
 | 6 | [x] | Checks: built-ins (never joined, silent, loops) + user-set (tool checks with expected vs actual, latency p95/p99, finish within N min) | `runtime/checks.py` | pytest on saved event dumps | no |
-| 7 | [ ] | `run start\|list\|logs\|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop, `--json`, exit codes | `cli.py`, `runtime/runner.py` | pytest + self-hosted | yes |
+| 7 | [x] | `run start\|list\|logs\|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop, `--json`, exit codes | `cli.py`, `runtime/runner.py` | pytest + self-hosted | yes |
 | 8 | [ ] | Usage and cost: agent cost and test cost from a built-in price table | `runtime/cost.py` | pytest on saved usage | no |
 | 9 | [ ] | Voice mode and recording (after the test ends) | `runtime/runner.py` | self-hosted, voice stub | yes |
 | 10 | [ ] | `report create`: one offline HTML file | `ui/report.py`, `ui/static/` | open the file | no |

@@ -1,4 +1,5 @@
-"""Stub agent for test_runner.py: canned replies, one 1.5 s tool, leaves on "bye". Spends nothing.
+"""Stub agent for test_runner.py: canned replies, one 1.5 s tool, leaves on "bye", fails on "fail", takes 12 s on
+"slow". Spends nothing.
 
 test_runner.py starts it; by hand:
 
@@ -30,6 +31,11 @@ class Stub(Agent):
         elif "tool" in text:
             yield llm.ChatChunk(id="c", delta=llm.ChoiceDelta(role="assistant", tool_calls=[
                 llm.FunctionToolCall(name="lookup", arguments="{}", call_id=f"call_{len(chat_ctx.items)}")]))
+        elif "fail" in text:
+            raise RuntimeError("provider 503")  # a provider error the agent doesn't get past
+        elif "slow" in text:
+            await asyncio.sleep(12)  # over livetest's 10 s to start a reply
+            yield "Sorry for the wait."
         elif "bye" in text:
             asyncio.get_running_loop().call_later(0.5, get_job_context().shutdown)
             yield "Goodbye."
