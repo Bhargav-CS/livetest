@@ -53,10 +53,13 @@ def test_latency_over_limit():
 
 
 def test_silent():
-    events = list(EVENTS)
-    del events[max(n for n, (_, _, t, d) in enumerate(events) if t == "conversation_item_added" and "ASSISTANT" in str(d))]
-    out = run(events=events)["silent"]
-    assert not out["passed"] and out["actual"] == ["thanks"]
+    """A turn the agent doesn't start replying to within 10 s fails, whatever it said later."""
+    last = max(n for n, (_, _, t, d) in enumerate(EVENTS) if t == "agent_state_changed" and d[t]["new_state"] == "AS_SPEAKING")
+    never = EVENTS[:last] + EVENTS[last + 1:]
+    late = [(ts + checks.REPLY_S + 1, *e) if n == last else (ts, *e) for n, (ts, *e) in enumerate(EVENTS)]
+    for events in (never, late):
+        out = run(events=events)["silent"]
+        assert not out["passed"] and out["actual"] == ["thanks"]
 
 
 def test_loops():
@@ -72,7 +75,7 @@ def test_max_minutes_fails():
 def test_verdict_stored(tmp_path):
     db = store.connect(tmp_path / "t.db")
     s = Scenario(name="s", goal="g")
-    a, b, c = (store.start_result(db, s, None, "r") for _ in range(3))
+    a, b, c = store.start_run(db, "r", "agent", None, [(s, "r")] * 3)
     store.finish_result(db, a, "done", "max_turns", [{"check": "x", "passed": True}])
     store.finish_result(db, b, "done", "max_minutes", [{"check": "x", "passed": True}, {"check": "y", "passed": False}])
     store.finish_result(db, c, "never_joined", "no agent")

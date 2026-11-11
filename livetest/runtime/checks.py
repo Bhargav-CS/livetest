@@ -9,6 +9,10 @@ from difflib import SequenceMatcher
 
 from livetest.runtime.models import Latency, NoToolErrors, Scenario, ToolCheck
 
+# The agent must start replying within this many seconds of a tester turn; provider errors (4xx / 5xx) it retries
+# past inside that don't count. The runner ends the test on a turn that misses it.
+REPLY_S = 10
+
 
 def _args(text: str | None):
     try:
@@ -23,25 +27,24 @@ def evaluate(scenario: Scenario, ended: str, events) -> list[dict]:
     for ts, _, kind, data in events:
         ev = data.get(kind) or {}
         if kind == "tester_turn":
-            turns.append({"said": data["text"], "at": ts, "gap": None, "replied": False})
+            turns.append({"said": data["text"], "at": ts, "gap": None})
         elif kind == "agent_state_changed" and ev.get("new_state") == "AS_SPEAKING" and turns and turns[-1]["gap"] is None:
             # ponytail: tester_turn ts is when the text is sent; voice mode (module 9) needs when the tester stops speaking
             turns[-1]["gap"] = ts - turns[-1]["at"]
         elif kind == "conversation_item_added" and (m := ev["item"].get("message", {})).get("role") == "ASSISTANT":
             replies.append(" ".join(c.get("text", "") for c in m.get("content", [])))
-            if turns:
-                turns[-1]["replied"] = True
         elif kind == "function_tools_executed":
             calls += ev.get("function_calls", [])
             outputs |= {o["call_id"]: o for o in ev.get("function_call_outputs", [])}
     calls = [{"name": c["name"], "args": _args(c.get("arguments")), "output": outputs.get(c["call_id"], {}).get("output"),
               "error": outputs.get(c["call_id"], {}).get("is_error", False)} for c in calls]
 
-    unanswered = [t["said"] for t in turns if not t["replied"]]
+    unanswered = [t["said"] for t in turns if t["gap"] is None or t["gap"] > REPLY_S]
     # ponytail: 90% alike back to back catches word-for-word loops; v0.2 likely wants a semantic or windowed rule
     loops = [[a, b] for a, b in zip(replies, replies[1:]) if a and SequenceMatcher(None, a, b).ratio() >= 0.9]
     out = [
-        {"check": "silent", "passed": not unanswered, "expected": "a reply to every tester turn", "actual": unanswered},
+        {"check": "silent", "passed": not unanswered, "expected": f"a reply to every tester turn within {REPLY_S} s",
+         "actual": unanswered},
         {"check": "loops", "passed": not loops, "expected": "no reply repeating the one before", "actual": loops},
         {"check": "finished_in_time", "passed": ended != "max_minutes",
          "expected": f"ends within {scenario.max_minutes} min", "actual": ended},

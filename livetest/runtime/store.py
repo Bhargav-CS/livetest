@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import time
+from importlib.metadata import version
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -75,6 +76,19 @@ MIGRATIONS = [
     ALTER TABLE results ADD COLUMN passed INTEGER;  -- 1 | 0; NULL = not checked (status isn't done)
     ALTER TABLE results ADD COLUMN checks TEXT;     -- JSON: checks.evaluate's outcomes
     """,
+    # 6. A run's tests are queued up front, so `--test N` exists before it starts. Results' status gains
+    #    queued | stopping (asked to stop, ends at its next check) | stopped. A run's own status comes from its tests.
+    """
+    CREATE TABLE runs (
+        id         TEXT PRIMARY KEY,  -- `run start --run`, or the next free number
+        agent      TEXT NOT NULL,
+        profile    TEXT,              -- its name; each result has it as JSON
+        version    TEXT NOT NULL,     -- livetest's
+        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    ALTER TABLE results ADD COLUMN run TEXT REFERENCES runs (id) ON DELETE CASCADE;
+    ALTER TABLE results ADD COLUMN test INTEGER;  -- 1..N in its run
+    """,
 ]
 
 TABLES = {Agent: "agents", Profile: "profiles", Scenario: "scenarios", Plugin: "plugins"}
@@ -112,10 +126,58 @@ def use(conn: sqlite3.Connection, name: str) -> bool:
                             "SELECT json_extract(data, '$.kind'), id FROM plugins WHERE name = ?", (name,)).rowcount > 0
 
 
-def start_result(conn: sqlite3.Connection, scenario: Scenario, profile: Profile | None, room: str) -> int:
+def _dicts(cur: sqlite3.Cursor) -> list[dict]:
+    return [dict(zip([c[0] for c in cur.description], row)) for row in cur]
+
+
+def start_run(conn: sqlite3.Connection, run: str, agent: str, profile: Profile | None,
+              tests: list[tuple[Scenario, str]]) -> list[int]:
+    """Save a run and queue its tests, (scenario, room) each; returns their result ids. IntegrityError if `run` is taken."""
     with conn:
-        return conn.execute("INSERT INTO results (scenario, profile, room) VALUES (?, ?, ?)",
-                            (scenario.model_dump_json(), profile and profile.model_dump_json(), room)).lastrowid
+        conn.execute("INSERT INTO runs (id, agent, profile, version) VALUES (?, ?, ?, ?)",
+                     (run, agent, profile and profile.name, version("livetest")))
+        return [conn.execute("INSERT INTO results (scenario, profile, room, run, test, status) VALUES (?, ?, ?, ?, ?, 'queued')",
+                             (s.model_dump_json(), profile and profile.model_dump_json(), room, run, n)).lastrowid
+                for n, (s, room) in enumerate(tests, 1)]
+
+
+def next_run_id(conn: sqlite3.Connection) -> str:
+    """One more than the biggest all-digits run id."""
+    return str(conn.execute("SELECT COALESCE(MAX(CAST(id AS INTEGER)), 0) + 1 FROM runs WHERE id NOT GLOB '*[^0-9]*'").fetchone()[0])
+
+
+def runs(conn: sqlite3.Connection, run: str | None = None) -> list[dict]:
+    """Every run, oldest first, with its status and test counts; or just `run` ('latest' is the newest)."""
+    # ponytail: a killed process (Ctrl+C, crash) leaves its tests 'running', so the run too; add a heartbeat if that bites
+    return _dicts(conn.execute(
+        "SELECT r.*, CASE WHEN SUM(t.status IN ('queued', 'running')) THEN 'running' "
+        "WHEN SUM(t.status = 'stopping') THEN 'stopping' WHEN SUM(t.status = 'stopped') THEN 'stopped' ELSE 'done' END "
+        "AS status, COUNT(t.id) AS tests, COUNT(t.finished_at) AS finished, COALESCE(SUM(t.passed), 0) AS passed, "
+        "COUNT(t.passed) AS checked FROM runs r LEFT JOIN results t ON t.run = r.id "
+        "WHERE ? IS NULL OR r.id = ? OR (? = 'latest' AND r.rowid = (SELECT MAX(rowid) FROM runs)) "
+        "GROUP BY r.id ORDER BY r.rowid", (run, run, run)))
+
+
+def results(conn: sqlite3.Connection, run: str) -> list[dict]:
+    """A run's tests in order, each with its agent's error count: errors are reported, not checked."""
+    return _dicts(conn.execute("SELECT r.*, (SELECT COUNT(*) FROM events e WHERE e.result = r.id AND e.source = 'agent' "
+                               "AND e.type = 'error') AS agent_errors FROM results r WHERE run = ? ORDER BY test", (run,)))
+
+
+def begin(conn: sqlite3.Connection, result: int) -> bool:
+    """queued → running. False if it was stopped while queued."""
+    with conn:
+        return conn.execute("UPDATE results SET status = 'running', started_at = CURRENT_TIMESTAMP "
+                            "WHERE id = ? AND status = 'queued'", (result,)).rowcount > 0
+
+
+def stop(conn: sqlite3.Connection, run: str, test: int | None = None) -> int:
+    """Queued tests never start; running ones end at their next check (runner). Returns how many it stopped."""
+    with conn:
+        return conn.execute("UPDATE results SET status = IIF(status = 'queued', 'stopped', 'stopping'), "
+                            "ended = 'stopped by user', finished_at = IIF(status = 'queued', CURRENT_TIMESTAMP, NULL) "
+                            "WHERE run = ? AND status IN ('queued', 'running') AND (? IS NULL OR test = ?)",
+                            (run, test, test)).rowcount
 
 
 def event(conn: sqlite3.Connection, result: int, source: str, type: str, data, ts: float | None = None) -> None:
@@ -134,14 +196,21 @@ def finish_result(conn: sqlite3.Connection, result: int, status: str, ended: str
 
 
 def result(conn: sqlite3.Connection, result: int) -> dict:
-    cur = conn.execute("SELECT * FROM results WHERE id = ?", (result,))
-    return dict(zip([c[0] for c in cur.description], cur.fetchone()))
+    return _dicts(conn.execute("SELECT * FROM results WHERE id = ?", (result,)))[0]
 
 
 def events(conn: sqlite3.Connection, result: int) -> list[tuple[float, str, str, object]]:
     """(ts, source, type, data) in the order they happened."""
     found = conn.execute("SELECT ts, source, type, data FROM events WHERE result = ? ORDER BY ts, rowid", (result,))
     return [(ts, source, t, json.loads(data)) for ts, source, t, data in found]
+
+
+def run_events(conn: sqlite3.Connection, run: str, test: int | None = None, after: int = 0) -> list[tuple]:
+    """(rowid, test, ts, source, type, data) of a run's events past rowid `after`, as written: follow a live run."""
+    found = conn.execute("SELECT e.rowid, r.test, e.ts, e.source, e.type, e.data FROM events e JOIN results r ON r.id = e.result "
+                         "WHERE r.run = ? AND (? IS NULL OR r.test = ?) AND e.rowid > ? ORDER BY e.rowid",
+                         (run, test, test, after))
+    return [(*row[:5], json.loads(row[5])) for row in found]
 
 
 def active(conn: sqlite3.Connection) -> dict[str, Plugin]:

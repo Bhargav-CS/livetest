@@ -4,19 +4,28 @@ import argparse
 import asyncio
 import getpass
 import json
+import logging
+import os
 import sqlite3
 import sys
+import time
 import uuid
+from collections import Counter
 from contextlib import closing
 from importlib.metadata import version
 from pathlib import Path
 
+import jwt
 from pydantic import ValidationError
 
-from livetest.platform import keys, llm, logging
+from livetest.platform import keys, llm
+from livetest.platform import logging as logs
 from livetest.platform.db import DEFAULT_PATH
-from livetest.runtime import session, store, tokens
+from livetest.runtime import runner, session, store, tokens
 from livetest.runtime.models import Agent, Participant, Plugin, Profile, Scenario, key_var
+
+ISSUES = "https://github.com/Bhargav-CS/livetest/issues"
+LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 class Fail(Exception):
@@ -88,6 +97,17 @@ def flag(kind: type) -> str:
 
 def env_file(args: argparse.Namespace) -> Path:
     return args.db.parent / ".env"  # keys sit next to the DB, never in it
+
+
+def errors_file(args: argparse.Namespace) -> Path:
+    return args.db.parent / "errors.log"
+
+
+def find(db: sqlite3.Connection, kind: type, name: str):
+    """A saved agent, profile or plugin by name."""
+    if found := {m.name: m for _, m in store.rows(db, kind)}.get(name):
+        return found
+    raise Fail(f"no {label(kind)} named '{name}'; see: livetest {label(kind)} list")
 
 
 def secret_vars(kind: type, name: str) -> list[str]:
@@ -172,14 +192,8 @@ def cmd_plugin_list(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     on = {p.name for p in store.active(db).values()}
     found = [m.model_dump(mode="json") | {"active": m.name in on, "key": bool(keys.get(env_file(args), key_var(m.name)))}
              for _, m in store.rows(db, Plugin)]  # whether a key is set, never the key
-    if args.json:
-        print(json.dumps(found, indent=2))
-    elif not found:
-        print("none yet; see: livetest plugin add -h")
-    for p in [] if args.json else found:
-        print(f"{'*' if p['active'] else ' '} {p['name']:<20} {p['kind']:<4} {p['base_url']:<40} {p['model']}  "
-              f"key: {'set' if p['key'] else 'none'}")
-    return 0
+    return listing(args, found, [f"{'*' if p['active'] else ' '} {p['name']:<20} {p['kind']:<4} {p['base_url']:<40} "
+                                 f"{p['model']}  key: {'set' if p['key'] else 'none'}" for p in found], "plugin add -h")
 
 
 def cmd_agent_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
@@ -251,16 +265,17 @@ def summary(n: int, m) -> str:
     return f"{m.name:<24} {json.dumps(rest)}"
 
 
+def listing(args: argparse.Namespace, found: list, lines: list[str], start: str) -> int:
+    """What every `list` prints: JSON for scripts, else a line per row, or where to start when there are none."""
+    print(json.dumps(found, indent=2) if args.json else "\n".join(lines) or f"none yet; see: livetest {start}")
+    return 0
+
+
 def cmd_list(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     found = [(n, m) for n, m in store.rows(db, args.kind) if not getattr(args, "tag", None) or args.tag in m.tags]
-    if args.json:
-        number = args.kind is Scenario  # scenarios are picked by number in `run start`
-        print(json.dumps([({"number": n} if number else {}) | m.model_dump(mode="json") for n, m in found], indent=2))
-    elif not found:
-        print(f"none yet; see: livetest {label(args.kind)} add -h")
-    for n, m in [] if args.json else found:
-        print(summary(n, m))
-    return 0
+    number = args.kind is Scenario  # scenarios are picked by number in `run start`
+    return listing(args, [({"number": n} if number else {}) | m.model_dump(mode="json") for n, m in found],
+                   [summary(n, m) for n, m in found], f"{label(args.kind)} add -h")
 
 
 def cmd_remove(db: sqlite3.Connection, args: argparse.Namespace) -> int:
@@ -278,12 +293,163 @@ def cmd_remove(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     return 0
 
 
+def outcome(r: dict) -> str:
+    return {1: "passed", 0: "failed"}.get(r["passed"], r["status"])
+
+
+def verdict(r: dict) -> str:
+    """One line per test: number, scenario, outcome, the failed checks or how it ended, and the agent's errors."""
+    failed = [c["check"] for c in json.loads(r["checks"] or "[]") if not c["passed"]]
+    why = (", ".join(failed) or r["ended"] or "")[:200]  # an error's text can be a whole response body
+    errors = f"  ({r['agent_errors']} agent errors)" if r["agent_errors"] else ""
+    return f"#{r['test']:<3} {json.loads(r['scenario'])['name']:<24} {outcome(r).upper():<16} {why}{errors}"
+
+
+def run_line(r: dict) -> str:
+    return (f"{r['id']:<16} {r['agent']:<20} {r['started_at']}  {r['finished']}/{r['tests']} tests  "
+            f"{r['passed']}/{r['checked']} passed  {r['status']}")
+
+
+def event_line(agent: str, test: int, ts: float, source: str, kind: str, data: dict) -> str:
+    ev = data.get(kind) or {}  # session-host events nest under their own name
+    if kind == "tester_turn":
+        what = f"tester: {data['text']}"
+    elif m := (ev.get("item") or {}).get("message"):  # a USER item is what the agent took in (voice: what its STT heard)
+        what = f"agent_{agent}{'_heard' if m['role'] == 'USER' else ''}: " + " ".join(c.get("text", "") for c in m.get("content", []))
+    elif source == "log":
+        what = f"[log] {kind} {data['logger']}: {data['message']}"
+    elif "new_state" in ev:
+        what = f"[{source}] {kind} {ev['new_state']}"
+    else:
+        what = f"[{source}] {kind} {json.dumps(ev)[:160]}" if ev else f"[{source}] {kind}"
+    return f"{time.strftime('%H:%M:%S', time.localtime(ts))} #{test:<3} {what}"
+
+
+def pick_run(db: sqlite3.Connection, args: argparse.Namespace) -> dict:
+    run = need(args.run, "Run (its id, or latest): ", "--run")
+    if found := store.runs(db, run):
+        return found[0]
+    raise Fail(f"no run '{run}'; see: livetest run list")
+
+
+def cmd_run_start(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    agent = find(db, Agent, need(args.name, "Agent to test: ", "--name"))
+    items = args.scenario or need(None, "Scenarios to run (e.g. 1-5 7x3, or all): ", "--scenario").split()
+    try:
+        tests = runner.select(items, store.rows(db, Scenario))
+        run = runner.run_id(args.run) if args.run else store.next_run_id(db)
+    except ValueError as e:
+        raise Fail(e) from None
+    if store.runs(db, run):
+        raise Fail(f"run id '{run}' is taken; pick another with --run, or leave it out")
+    if args.parallel < 1:
+        raise Fail("--parallel must be 1 or more")
+    profile = find(db, Profile, args.profile) if args.profile else None
+    name = args.llm or os.environ.get("LIVETEST_LLM")  # flag > env > the active one
+    if not (plugin := find(db, Plugin, name) if name else store.active(db).get("llm")):
+        raise Fail("no tester LLM yet; see: livetest plugin add -h")
+    token = args.token or os.environ.get("LIVETEST_TOKEN")
+    if token and len(tests) > 1:
+        a = agent.name
+        raise Fail(f"a raw token joins one room, so it runs one test; this selection has {len(tests)}.\n"
+                   f"To run more, save how livetest gets tokens for '{a}': remove it, then add it again with one of\n"
+                   f"  livetest agent rm --name {a} -y\n  livetest agent add --name {a} --sandbox <sandbox-id>\n"
+                   f"  livetest agent add --name {a} --endpoint <your-token-endpoint-url>\n"
+                   f"  livetest agent add --name {a} --url <livekit-server-url>   # asks for its API key and secret")
+    file = env_file(args)
+    key, secret = (keys.get(file, v) for v in secret_vars(Agent, agent.name)) if agent.url else (None, None)
+
+    def connect(room: str) -> tuple[str, str]:
+        return tokens.connect(agent, room, profile, token=token, url=os.environ.get("LIVEKIT_URL"), key=key, secret=secret)
+
+    try:
+        connect(f"livetest-{run}-check")  # fail fast (bad token, profile mismatch, missing key), before anything is saved
+    except ValueError as e:
+        raise Fail(e) from None
+    except ConnectionError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 3
+    rooms = ([jwt.decode(token, options={"verify_signature": False}).get("video", {}).get("room", "")] if token  # its room
+             else [f"livetest-{run}-{n}-{uuid.uuid4().hex[:6]}" for n in range(1, len(tests) + 1)])
+    print(f"run id: {run}\n{agent.name}: {len({n for n, _ in tests})} scenarios, {len(tests)} tests, text mode, "
+          f"{args.parallel} in parallel, profile {profile.name if profile else 'none'}, tester llm {plugin.name}")
+    if not confirm("continue?", args):
+        print("cancelled")
+        return 0
+
+    ids = store.start_run(db, run, agent.name, profile, [(s, room) for (_, s), room in zip(tests, rooms)])
+    print(f"running; verdicts print when it ends, Ctrl+C stops it. Follow it: livetest run logs --run {run}", flush=True)
+
+    async def go() -> None:
+        tester = llm.llm(plugin.base_url, plugin.model, keys.get(file, key_var(plugin.name)))
+        try:
+            await runner.run(db, [(i, s, room) for i, (_, s), room in zip(ids, tests, rooms)],
+                             connect, tester, args.parallel, key, secret)
+        finally:
+            await tester.aclose()
+
+    interrupted = False
+    try:
+        asyncio.run(go())
+    except KeyboardInterrupt:  # Ctrl+C = run stop: running tests ended as stopped, queued ones never start
+        interrupted = True
+        store.stop(db, run)
+    found = store.results(db, run)
+    print("\n".join(map(verdict, found)))
+    print(f"run {run}: " + ", ".join(f"{n} {w}" for w, n in Counter(map(outcome, found)).items()))
+    if errored := [r["test"] for r in found if r["status"] == "error"]:
+        print(f"test {', '.join(map(str, errored))} hit an error; see: livetest run logs --run {run} --test {errored[0]}\n"
+              f"tracebacks are in {errors_file(args)}; if it looks like a livetest bug, report it with "
+              f"`livetest --version`: {ISSUES}")
+    statuses = {r["status"] for r in found}
+    if interrupted:
+        return 130
+    if statuses & {"never_joined", "no_session_host"}:
+        return 3
+    return 1 if "error" in statuses or any(r["passed"] == 0 for r in found) else 0
+
+
+def cmd_run_list(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    found = store.results(db, pick_run(db, args)["id"]) if args.run else store.runs(db)
+    return listing(args, found, [verdict(r) if args.run else run_line(r) for r in found], "run start -h")
+
+
+def cmd_run_logs(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    run, after = pick_run(db, args), 0
+    while True:
+        live = store.runs(db, run["id"])[0]["status"] in ("running", "stopping")  # read first: the last events still print
+        for rowid, test, ts, source, kind, data in store.run_events(db, run["id"], args.test, after):
+            after = rowid
+            if source == "log" and LEVELS.index(kind) < LEVELS.index(args.level):
+                continue
+            print(json.dumps({"test": test, "ts": ts, "source": source, "type": kind, "data": data}) if args.json
+                  else event_line(run["agent"], test, ts, source, kind, data), flush=True)
+        if not live:
+            return 0
+        time.sleep(0.5)
+
+
+def cmd_run_stop(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    run = pick_run(db, args)["id"]
+    what = f"test {args.test} of run {run}" if args.test else f"run {run}"
+    if not confirm(f"Stop {what}?", args):
+        print("cancelled")
+        return 0
+    if not (n := store.stop(db, run, args.test)):
+        raise Fail(f"{what} has nothing running or queued")
+    print(f"stopping {what} ({n} test{'s' * (n > 1)}); a running test ends within a few seconds and keeps what it recorded")
+    return 0
+
+
 def cmd(sub, name: str, func, help: str, *examples: str, **kw) -> argparse.ArgumentParser:
     """One command or group. Every help screen ends with examples (CLI standard rule 4); func=None prints help."""
     p = sub.add_parser(name, help=help, description=kw.pop("description", help), **kw,
                        formatter_class=argparse.RawDescriptionHelpFormatter,
                        epilog="examples:\n" + "\n".join(f"  {e}" for e in examples))
     p.set_defaults(func=func, help_of=p)
+    # Global, so it works after the command too; SUPPRESS keeps the root's value when it's not given here.
+    p.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS,
+                   help="debug logs and tracebacks on the console")
     return p
 
 
@@ -318,6 +484,9 @@ manage:
   profile     add, list or remove who the tester is, as the agent sees them
   scenario    add, list or remove what the tester tries to get done
   plugin      add, list, remove or pick the LLM the tester thinks with
+
+test:
+  run         start, list, follow or stop runs: scenarios against an agent
 """
 
 
@@ -332,6 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--db", type=Path, default=DEFAULT_PATH, help=f"database file (default: {DEFAULT_PATH})")
     parser.add_argument("--version", action="version", version=version("livetest"))
+    parser.add_argument("-v", "--verbose", action="store_true", help="debug logs and tracebacks on the console")
     # A command or group typed without its action prints its help instead of an error.
     parser.set_defaults(func=None, help_of=parser)
     # SUPPRESS keeps argparse's flat, alphabetical list out of root help (COMMANDS shows them).
@@ -425,11 +595,56 @@ def main(argv: list[str] | None = None) -> int:
             "livetest plugin use --plugin my-groq")
     p.add_argument("--plugin", help="its name")
 
+    actions = cmd(sub, "run", None, "Start, list, follow or stop runs: scenarios against an agent.",
+                  "livetest run start --name my-agent --scenario 1-5", "livetest run list",
+                  "livetest run logs --run latest", "livetest run stop --run latest"
+                  ).add_subparsers(dest="action", title="actions", metavar="<action>")
+    p = cmd(actions, "start", cmd_run_start, "run scenarios against an agent",
+            "livetest run start --name my-agent --scenario 1-20x10 25-35x2",
+            "livetest run start --name my-agent --scenario all --profile pro-user --parallel 8 -y",
+            "livetest run start --name my-agent --scenario reschedule --run nightly-1",
+            "livetest run start --name my-agent --scenario 3 --token <token>   # an agent saved without a token source",
+            description="Run scenarios against an agent, in text mode. --scenario takes numbers (7), ranges (1-20),\n"
+                        "names and all; xN repeats one (1-20x10). Shows the plan and asks first; scripts pass -y.\n"
+                        "Prints each test's verdict at the end; run logs follows the conversations. Ctrl+C stops the\n"
+                        "run like run stop, keeping what it recorded. A test fails if the agent doesn't start a reply within 10 s;\n"
+                        "provider errors it retries past only show up as a count of agent errors.\n"
+                        "Exit code: 0 all passed, 1 a test failed, 2 bad input, 3 the agent never joined.")
+    p.add_argument("--name", help="the agent to test")
+    p.add_argument("--scenario", nargs="+", metavar="ITEM", help="what to run: 7, 1-20, a name or all; xN repeats")
+    p.add_argument("--run", metavar="ID", help="the run's id (default: the next free number)")
+    p.add_argument("--profile", help="who the tester is, as the agent sees them (default: a plain participant)")
+    p.add_argument("--parallel", type=int, default=4, metavar="N",
+                   help="tests at once (default: 4); the agent's hosting sets the real limit")
+    p.add_argument("--llm", metavar="PLUGIN", help="the tester's LLM, if not the active one (env: LIVETEST_LLM)")
+    p.add_argument("--token", help="for an agent saved without a token source; runs one test (env: LIVETEST_TOKEN, "
+                                   "server URL from LIVEKIT_URL)")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+    p = cmd(actions, "list", cmd_run_list, "list runs, or one run's tests",
+            "livetest run list", "livetest run list --run latest", "livetest run list --run 17 --json")
+    p.add_argument("--run", help="a run's id, or latest: list its tests and verdicts")
+    p.add_argument("--json", action="store_true", help="print JSON for scripts")
+    p = cmd(actions, "logs", cmd_run_logs, "print a run's timeline; follows while it's live",
+            "livetest run logs --run latest", "livetest run logs --run 17 --test 4 --level WARNING",
+            "livetest run logs --run 17 --json")
+    p.add_argument("--run", help="a run's id, or latest")
+    p.add_argument("--test", type=int, metavar="N", help="only this test")
+    p.add_argument("--level", choices=LEVELS, default="INFO", type=str.upper,
+                   help="hide log lines below this (default: INFO)")
+    p.add_argument("--json", action="store_true", help="one JSON object per line, for scripts")
+    p = cmd(actions, "stop", cmd_run_stop, "stop a run, or one of its tests",
+            "livetest run stop --run latest", "livetest run stop --run 17 --test 4 -y",
+            description="Stop a run or one test. A running test ends cleanly and keeps what it recorded (no pass or\n"
+                        "fail); queued tests never start. Asks first at a terminal; scripts pass -y.")
+    p.add_argument("--run", help="a run's id, or latest")
+    p.add_argument("--test", type=int, metavar="N", help="only this test")
+    p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+
     args = parser.parse_args(argv)
     if args.func is None:
         args.help_of.print_help()
         return 0
-    logging.setup()  # -v comes with `run` (module 7)
+    logs.setup(args.verbose, errors_file(args))
     try:
         with closing(store.connect(args.db)) as db:
             return args.func(db, args)
@@ -442,6 +657,11 @@ def main(argv: list[str] | None = None) -> int:
         for err in e.errors():
             where = ".".join(map(str, err["loc"]))  # e.g. max_turns, participant.attributes
             print(f"error: {where + ': ' if where else ''}{err['msg'].removeprefix('Value error, ')}", file=sys.stderr)
+    except Exception as e:  # a bug: the traceback goes to errors.log, the person gets where to report it
+        logging.getLogger("livetest").exception("livetest %s crashed", version("livetest"), extra={"console": False})
+        print(f"error: livetest hit a bug ({e or type(e).__name__}). The details are in {errors_file(args)};\n"
+              f"please report it there with that file and `livetest --version`: {ISSUES}", file=sys.stderr)
+        return 1
     return 2
 
 

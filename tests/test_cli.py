@@ -1,4 +1,4 @@
-"""The CLI and the DB behind it (`init`, `agent`, `profile`, `scenario`, `plugin`, migrations), against a throwaway DB."""
+"""The CLI and the DB behind it (`init`, `agent`, `profile`, `scenario`, `plugin`, `run`, migrations), against a throwaway DB."""
 
 import json
 import os
@@ -12,7 +12,7 @@ from dotenv import dotenv_values
 
 from livetest.cli import main
 from livetest.platform import keys, llm
-from livetest.runtime import session, store, tokens
+from livetest.runtime import runner, session, store, tokens
 from livetest.runtime.models import Agent, Plugin, Profile, Scenario
 
 
@@ -172,7 +172,7 @@ def test_remove_needs_confirmation(run, path, monkeypatch):
 
 def test_no_action_prints_help_without_touching_db(run, path, capsys):
     assert run() == 0 and "get started" in capsys.readouterr().out
-    for group in ("agent", "profile", "scenario", "plugin"):
+    for group in ("agent", "profile", "scenario", "plugin", "run"):
         assert run(group) == 0 and "actions" in capsys.readouterr().out
     run("agent")
     assert "remove an agent" in capsys.readouterr().out
@@ -353,3 +353,144 @@ def test_init_offers_an_agent_then_a_tester_llm(run, path, reachable, monkeypatc
     assert run("init") == 0
     assert saved(path, Agent)["ALIVE"][1].sandbox == "sb-1" and active(path) == {"llm": "local"}
     assert run("init") == 0  # has both now: asks nothing (answers are used up)
+
+
+@pytest.fixture
+def ready(run, reachable):
+    """An agent, scenarios 1-3 and a tester LLM: enough for `run start`."""
+    assert run("agent", "add", "--name", "bot", "--sandbox", "sb") == 0
+    for name in ("a", "b", "c"):
+        assert run("scenario", "add", "--scenario", name, "--goal", "g") == 0
+    assert run("plugin", "add", "--plugin", "p", "--base-url", "http://x/v1", "--model", "m") == 0
+
+
+def finishes(monkeypatch, *outcomes):
+    """runner.run ends each test with the next (status, passed); no LiveKit. Records each run's parallel."""
+    seen = []
+
+    async def fake(db, tests, connect, tester, parallel, key, secret):
+        seen.append(parallel)
+        for (result, _, room), (status, passed) in zip(tests, outcomes):
+            assert room.startswith("livetest-") and store.begin(db, result)
+            store.finish_result(db, result, status, "max_turns", None if passed is None else [{"check": "c", "passed": passed}])
+
+    monkeypatch.setattr(runner, "run", fake)
+    return seen
+
+
+def listed(run, capsys, *flags):
+    capsys.readouterr()
+    assert run("run", "list", "--json", *flags) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_run_start_and_list(run, ready, monkeypatch, capsys):
+    seen = finishes(monkeypatch, *[("done", True)] * 3)
+    assert run("run", "start", "--name", "bot", "--scenario", "1-3", "-y") == 0
+    assert run("run", "start", "--name", "bot", "--scenario", "ax2", "c", "--run", "nightly-1", "--parallel", "1", "-y") == 0
+    assert seen == [4, 1]  # parallel defaults to 4
+    assert run("run", "start", "--name", "bot", "--scenario", "1", "-y") == 0
+    runs = listed(run, capsys)
+    assert [(r["id"], r["agent"], r["status"], r["tests"], r["passed"]) for r in runs] == [
+        ("1", "bot", "done", 3, 3), ("nightly-1", "bot", "done", 3, 3), ("2", "bot", "done", 1, 1)]  # next free number
+    tests = listed(run, capsys, "--run", "nightly-1")
+    assert [(t["test"], json.loads(t["scenario"])["name"]) for t in tests] == [(1, "a"), (2, "a"), (3, "c")]
+    assert listed(run, capsys, "--run", "latest")[0]["run"] == "2"
+    assert run("run", "list") == 0 and "nightly-1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("outcomes, code", [
+    ([("done", True)], 0),
+    ([("done", True), ("done", False)], 1),
+    ([("error", None)], 1),
+    ([("stopped", None), ("done", True)], 0),  # stopped tests count for neither
+    ([("never_joined", None), ("done", False)], 3),  # nothing tested beats a fail
+    ([("no_session_host", None)], 3),
+])
+def test_run_exit_codes(run, ready, monkeypatch, capsys, outcomes, code):
+    finishes(monkeypatch, *outcomes)
+    assert run("run", "start", "--name", "bot", "--scenario", f"1-{len(outcomes)}", "-y") == code
+    out = capsys.readouterr().out
+    if ("error", None) in outcomes:  # says where the details are and where to report a bug
+        assert "run logs --run 1 --test 1" in out and "errors.log" in out and "github.com" in out
+
+
+def test_run_start_refuses(run, path, ready, monkeypatch, capsys):
+    finishes(monkeypatch, ("done", True))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    start = lambda *a: run("run", "start", "--name", "bot", "--scenario", "1", *a)
+    assert start() == 2  # a script without -y
+    capsys.readouterr()
+    assert start("--run", "nightly 1", "-y") == 2 and "nightly-1" in capsys.readouterr().err
+    assert start("--parallel", "0", "-y") == 2
+    assert start("--llm", "nope", "-y") == 2
+    assert run("run", "start", "--name", "nobody", "--scenario", "1", "-y") == 2
+    assert run("run", "start", "--name", "bot", "--scenario", "99", "-y") == 2
+    assert run("run", "start", "--name", "bot", "-y") == 2  # no selection: nothing runs by accident
+    assert run("agent", "add", "--name", "tok") == 0  # no token source
+    capsys.readouterr()
+    assert run("run", "start", "--name", "tok", "--scenario", "1-2", "--token", "t", "-y") == 2
+    err = capsys.readouterr().err  # the next steps, as commands
+    assert "runs one test" in err and "livetest agent add --name tok --sandbox" in err
+    assert listed(run, capsys) == []
+    assert start("--run", "r1", "-y") == 0 and start("--run", "r1", "-y") == 2  # taken
+
+
+def test_run_start_fails_fast_on_tokens(run, ready, monkeypatch, capsys):
+    finishes(monkeypatch, ("done", True))
+
+    def refuse(*a, **kw):
+        raise ValueError("the token doesn't match the profile")
+
+    monkeypatch.setattr(tokens, "connect", refuse)
+    assert run("run", "start", "--name", "bot", "--scenario", "1", "-y") == 2
+    assert listed(run, capsys) == []  # checked before anything was saved
+
+
+def test_run_stop(run, path, capsys):
+    s = Scenario(name="s", goal="g")
+    with closing(store.connect(path)) as db:
+        first, *_ = store.start_run(db, "r", "bot", None, [(s, "x")] * 3)
+        store.begin(db, first)
+    assert run("run", "stop", "--run", "latest", "--test", "2", "-y") == 0
+    assert run("run", "stop", "--run", "r", "-y") == 0
+    assert [t["status"] for t in listed(run, capsys, "--run", "r")] == ["stopping", "stopped", "stopped"]
+    assert listed(run, capsys)[0]["status"] == "stopping"  # until test 1 ends: a run's status comes from its tests
+    assert run("run", "stop", "--run", "r", "--test", "2", "-y") == 2  # nothing left to stop
+    assert run("run", "stop", "--run", "nope", "-y") == 2
+
+
+def test_run_logs(run, path, capsys):
+    s = Scenario(name="s", goal="g")
+    with closing(store.connect(path)) as db:
+        one, two = store.start_run(db, "r", "bot", None, [(s, "x"), (s, "y")])
+        store.event(db, one, "tester", "tester_turn", {"text": "hello"})
+        for role, text in (("USER", "hello"), ("ASSISTANT", "Hi there")):
+            store.event(db, one, "agent", "conversation_item_added", {"conversation_item_added": {"item": {
+                "message": {"role": role, "content": [{"text": text}]}}}})
+        store.event(db, two, "log", "INFO", {"logger": "livetest.runner", "message": "agent joined"})
+        store.event(db, two, "log", "ERROR", {"logger": "livetest.runner", "message": "test failed"})
+        for n in (one, two):  # finished: logs prints and returns instead of following
+            store.finish_result(db, n, "done", "max_turns")
+    capsys.readouterr()
+    assert run("run", "logs", "--run", "r") == 0
+    out = capsys.readouterr().out
+    assert all(x in out for x in ("tester: hello", "agent_bot_heard: hello", "agent_bot: Hi there", "agent joined", "test failed"))
+    assert run("run", "logs", "--run", "r", "--test", "2", "--level", "WARNING") == 0
+    out = capsys.readouterr().out
+    assert "test failed" in out and "agent joined" not in out and "hello" not in out
+    assert run("run", "logs", "--run", "r", "--json") == 0
+    assert [json.loads(line)["type"] for line in capsys.readouterr().out.splitlines()] == [
+        "tester_turn", "conversation_item_added", "conversation_item_added", "INFO", "ERROR"]
+
+
+def test_crash_goes_to_errors_log(run, path, monkeypatch, capsys):
+    def boom(*a):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(store, "rows", boom)
+    assert run("agent", "list") == 1
+    err = capsys.readouterr().err
+    assert "errors.log" in err and "github.com" in err and "Traceback" not in err  # no traceback without -v
+    log = (path.parent / "errors.log").read_text()
+    assert "Traceback" in log and "boom" in log
