@@ -1,5 +1,5 @@
 """Stub agent for test_runner.py: canned replies, one 1.5 s tool, leaves on "bye", fails on "fail", takes 12 s on
-"slow". Spends nothing.
+"slow"; greets first unless its dispatch metadata is "silent". Spends nothing. With LIVETEST_LIVE_STT_URL / LIVETEST_LIVE_TTS_URL set it also hears and speaks, for voice tests.
 
 test_runner.py starts it; by hand:
 
@@ -7,8 +7,9 @@ test_runner.py starts it; by hand:
 """
 
 import asyncio
+import os
 
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, function_tool, get_job_context, llm
+from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, function_tool, get_job_context, inference, llm
 from livekit.plugins import openai
 
 
@@ -22,11 +23,17 @@ class Stub(Agent):
         await asyncio.sleep(1.5)  # a tool with a visible duration
         return "found it"
 
+    async def on_enter(self):
+        if get_job_context().job.metadata != "silent":
+            self.session.generate_reply()
+
     async def llm_node(self, chat_ctx, tools, model_settings):
         await asyncio.sleep(0.3)  # pretend thinking
         last = chat_ctx.items[-1]
-        text = (last.text_content or "") if last.type == "message" else ""
-        if last.type == "function_call_output":
+        text = (last.text_content or "").lower() if last.type == "message" else ""  # by voice: "Please use the tool."
+        if not any(i.type == "message" and i.role == "user" for i in chat_ctx.items):
+            yield "Hi, how can I help?"  # its greeting
+        elif last.type == "function_call_output":
             yield "Done, I found it."
         elif "tool" in text:
             yield llm.ChatChunk(id="c", delta=llm.ChoiceDelta(role="assistant", tool_calls=[
@@ -46,7 +53,10 @@ class Stub(Agent):
 async def entrypoint(ctx: JobContext):
     await ctx.connect()
     # Fake key: llm_node is overridden, so this LLM is never called. AgentSession skips replies without one.
-    await AgentSession(llm=openai.LLM(api_key="not-a-key")).start(agent=Stub(), room=ctx.room)
+    voice = {"stt": openai.STT(model="moonshine-base", use_realtime=True, api_key="none", base_url=stt),
+             "tts": openai.TTS(model="kokoro-7m", voice="af_msa", api_key="none", base_url=os.environ["LIVETEST_LIVE_TTS_URL"]),
+             "vad": inference.VAD()} if (stt := os.getenv("LIVETEST_LIVE_STT_URL")) else {}
+    await AgentSession(llm=openai.LLM(api_key="not-a-key"), **voice).start(agent=Stub(), room=ctx.room)
 
 
 if __name__ == "__main__":

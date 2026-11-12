@@ -11,19 +11,15 @@ from pydantic import BaseModel
 from livetest.platform import db
 from livetest.runtime.models import Agent, Plugin, Profile, Scenario
 
-# Append only: each step runs once per DB, in order. Never edit a released step; add a new one.
+# Each step runs once per DB, in order (`platform/db.py`). Until v0.1 ships there's one: edit it in place.
 MIGRATIONS = [
-    # 1. Was the whole schema before migrations, hence IF NOT EXISTS.
     """
-    CREATE TABLE IF NOT EXISTS agents (
+    CREATE TABLE agents (
         id         INTEGER PRIMARY KEY,
         name       TEXT NOT NULL UNIQUE,
         data       TEXT NOT NULL,  -- the model as JSON, minus name (same in every table)
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
-    """,
-    # 2. AUTOINCREMENT: a scenario's id is its global number, never reused after a remove.
-    """
     CREATE TABLE profiles (
         id         INTEGER PRIMARY KEY,
         name       TEXT NOT NULL UNIQUE,
@@ -31,37 +27,52 @@ MIGRATIONS = [
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE scenarios (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,  -- its global number, never reused after a remove
         name       TEXT NOT NULL UNIQUE,
         data       TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
-    """,
-    # 3. The primary key keeps one active plugin per kind; removing a plugin clears it.
-    """
     CREATE TABLE plugins (
         id         INTEGER PRIMARY KEY,
         name       TEXT NOT NULL UNIQUE,
         data       TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    -- The primary key keeps one active plugin per kind; removing a plugin clears it.
     CREATE TABLE active_plugins (
         kind   TEXT PRIMARY KEY,
         plugin INTEGER NOT NULL REFERENCES plugins (id) ON DELETE CASCADE
     );
-    """,
-    # 4. One row per test; everything that happened in it is an event, written as it arrives. Runs come in module 7.
-    """
-    CREATE TABLE results (
-        id          INTEGER PRIMARY KEY,
-        scenario    TEXT NOT NULL,  -- JSON, as it was when the test ran
-        profile     TEXT,           -- JSON; NULL = plain participant
-        room        TEXT NOT NULL,
-        status      TEXT NOT NULL DEFAULT 'running',  -- running | done | never_joined | no_session_host | error
-        ended       TEXT,           -- done: max_turns | max_minutes | agent_left; otherwise the error
-        started_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        finished_at TEXT
+    -- A run's status comes from its tests.
+    CREATE TABLE runs (
+        id         TEXT PRIMARY KEY,  -- `run start --run`, or the next free number
+        agent      TEXT NOT NULL,
+        profile    TEXT,              -- its name; each result has it as JSON
+        mode       TEXT NOT NULL,     -- text | voice
+        version    TEXT NOT NULL,     -- livetest's
+        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    -- One row per test, queued up front so `--test N` exists before it starts.
+    CREATE TABLE results (
+        id                   INTEGER PRIMARY KEY,
+        run                  TEXT NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+        test                 INTEGER NOT NULL,  -- 1..N in its run
+        scenario             TEXT NOT NULL,     -- JSON, as it was when the test ran
+        profile              TEXT,              -- JSON; NULL = plain participant
+        room                 TEXT NOT NULL,
+        -- queued | running | stopping (asked to stop, ends at its next check) | stopped | done | never_joined |
+        -- no_session_host | error
+        status               TEXT NOT NULL DEFAULT 'queued',
+        ended                TEXT,     -- done: max_turns | max_minutes | agent_left | no_reply | no_greeting; else why
+        passed               INTEGER,  -- 1 | 0; NULL = not checked (status isn't done)
+        checks               TEXT,     -- JSON: checks.evaluate's outcomes
+        usage                TEXT,     -- JSON: checks.usage's {"agent": [...], "tester": [...]}, counts only
+        recording            TEXT,     -- voice: the stereo .ogg; NULL in text mode or with --no-recordings
+        recording_started_at REAL,     -- unix s its audio starts at, so events (ts) line up with it
+        started_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at          TEXT
+    );
+    -- Everything that happened in a test, written as it arrives.
     CREATE TABLE events (
         result INTEGER NOT NULL REFERENCES results (id) ON DELETE CASCADE,
         ts     REAL NOT NULL,  -- the tester's receive time (unix s), so it lines up with the recording
@@ -71,26 +82,6 @@ MIGRATIONS = [
     );
     CREATE INDEX events_by_result ON events (result, ts);
     """,
-    # 5. The verdict next to the status, written together, so run lists and pass rates need no JSON.
-    """
-    ALTER TABLE results ADD COLUMN passed INTEGER;  -- 1 | 0; NULL = not checked (status isn't done)
-    ALTER TABLE results ADD COLUMN checks TEXT;     -- JSON: checks.evaluate's outcomes
-    """,
-    # 6. A run's tests are queued up front, so `--test N` exists before it starts. Results' status gains
-    #    queued | stopping (asked to stop, ends at its next check) | stopped. A run's own status comes from its tests.
-    """
-    CREATE TABLE runs (
-        id         TEXT PRIMARY KEY,  -- `run start --run`, or the next free number
-        agent      TEXT NOT NULL,
-        profile    TEXT,              -- its name; each result has it as JSON
-        version    TEXT NOT NULL,     -- livetest's
-        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    ALTER TABLE results ADD COLUMN run TEXT REFERENCES runs (id) ON DELETE CASCADE;
-    ALTER TABLE results ADD COLUMN test INTEGER;  -- 1..N in its run
-    """,
-    # 7. What a test used, as counts (no cost in v0.1): checks.usage's {"agent": [...], "tester": [...]}, JSON.
-    "ALTER TABLE results ADD COLUMN usage TEXT;",
 ]
 
 TABLES = {Agent: "agents", Profile: "profiles", Scenario: "scenarios", Plugin: "plugins"}
@@ -101,7 +92,7 @@ def connect(path: Path = db.DEFAULT_PATH) -> sqlite3.Connection:
 
 
 def add(conn: sqlite3.Connection, model: BaseModel) -> int:
-    """Save an agent, profile or scenario; returns its number. Raises sqlite3.IntegrityError if the name is taken."""
+    """Save an agent, profile, scenario or plugin; returns its number. Raises sqlite3.IntegrityError if the name is taken."""
     with conn:
         return conn.execute(
             f"INSERT INTO {TABLES[type(model)]} (name, data) VALUES (?, ?)",
@@ -133,12 +124,12 @@ def _dicts(cur: sqlite3.Cursor) -> list[dict]:
 
 
 def start_run(conn: sqlite3.Connection, run: str, agent: str, profile: Profile | None,
-              tests: list[tuple[Scenario, str]]) -> list[int]:
+              tests: list[tuple[Scenario, str]], mode: str = "text") -> list[int]:
     """Save a run and queue its tests, (scenario, room) each; returns their result ids. IntegrityError if `run` is taken."""
     with conn:
-        conn.execute("INSERT INTO runs (id, agent, profile, version) VALUES (?, ?, ?, ?)",
-                     (run, agent, profile and profile.name, version("livetest")))
-        return [conn.execute("INSERT INTO results (scenario, profile, room, run, test, status) VALUES (?, ?, ?, ?, ?, 'queued')",
+        conn.execute("INSERT INTO runs (id, agent, profile, version, mode) VALUES (?, ?, ?, ?, ?)",
+                     (run, agent, profile and profile.name, version("livetest"), mode))
+        return [conn.execute("INSERT INTO results (scenario, profile, room, run, test) VALUES (?, ?, ?, ?, ?)",
                              (s.model_dump_json(), profile and profile.model_dump_json(), room, run, n)).lastrowid
                 for n, (s, room) in enumerate(tests, 1)]
 
@@ -161,9 +152,12 @@ def runs(conn: sqlite3.Connection, run: str | None = None) -> list[dict]:
 
 
 def results(conn: sqlite3.Connection, run: str) -> list[dict]:
-    """A run's tests in order, each with its agent's error count: errors are reported, not checked."""
-    return _dicts(conn.execute("SELECT r.*, (SELECT COUNT(*) FROM events e WHERE e.result = r.id AND e.source = 'agent' "
-                               "AND e.type = 'error') AS agent_errors FROM results r WHERE run = ? ORDER BY test", (run,)))
+    """A run's tests in order, each with its agent's error count and last error: errors are reported, not checked."""
+    return _dicts(conn.execute(
+        "SELECT r.*, COUNT(e.rowid) AS agent_errors, (SELECT json_extract(l.data, '$.error.message') FROM events l "
+        "WHERE l.result = r.id AND l.source = 'agent' AND l.type = 'error' ORDER BY l.rowid DESC LIMIT 1) AS last_error "
+        "FROM results r LEFT JOIN events e ON e.result = r.id AND e.source = 'agent' AND e.type = 'error' "
+        "WHERE r.run = ? GROUP BY r.id ORDER BY r.test", (run,)))
 
 
 def begin(conn: sqlite3.Connection, result: int) -> bool:
@@ -196,6 +190,11 @@ def finish_result(conn: sqlite3.Connection, result: int, status: str, ended: str
         conn.execute("UPDATE results SET status = ?, ended = ?, passed = ?, checks = ?, usage = ?, "
                      "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
                      (status, ended, passed, checks, usage and json.dumps(usage), result))
+
+
+def recorded(conn: sqlite3.Connection, result: int, path: str, started_at: float) -> None:
+    with conn:
+        conn.execute("UPDATE results SET recording = ?, recording_started_at = ? WHERE id = ?", (path, started_at, result))
 
 
 def result(conn: sqlite3.Connection, result: int) -> dict:

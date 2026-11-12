@@ -1,6 +1,6 @@
 """The tester's LLM: any OpenAI-compatible server through LiveKit's OpenAI plugin, which always streams.
 
-The same object drops into a voice AgentSession later.
+The same object talks in text mode and thinks inside the tester's voice AgentSession.
 """
 
 import time

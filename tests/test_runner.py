@@ -4,6 +4,11 @@ Live part: a self-hosted LiveKit server (`podman kube play --replace dev/livekit
 which these tests start themselves. Skipped unless set:
 
     $env:LIVETEST_SELFHOST="ws://<podman machine ip>:7880"; uv run pytest tests/test_runner.py
+
+Voice tests also need a streaming STT and a TTS, OpenAI-compatible; private-ai's Moonshine and Kokoro-7M in dev. The
+stub agent uses them too (so they cost nothing):
+
+    $env:LIVETEST_LIVE_STT_URL="http://<host>:9092/v1"; $env:LIVETEST_LIVE_TTS_URL="http://<host>:8881/v1"
 """
 
 import asyncio
@@ -22,12 +27,16 @@ from pathlib import Path
 
 import pytest
 
-from livetest.platform import llm
+from livetest.platform import llm, stt, tts
 from livetest.runtime import runner, store, tokens
-from livetest.runtime.models import Agent, Scenario
+from livetest.runtime.models import Agent, Profile, Scenario
 
 URL, KEY, SECRET = os.getenv("LIVETEST_SELFHOST"), "devkey", "secret"  # livekit-server --dev
 selfhost = pytest.mark.skipif(not URL, reason="set LIVETEST_SELFHOST=ws://<podman machine ip>:7880")
+STT_URL, TTS_URL = os.getenv("LIVETEST_LIVE_STT_URL"), os.getenv("LIVETEST_LIVE_TTS_URL")
+voiced = pytest.mark.skipif(not (URL and STT_URL and TTS_URL), reason="set LIVETEST_SELFHOST, LIVETEST_LIVE_STT_URL "
+                                                                       "and LIVETEST_LIVE_TTS_URL")
+SILENT = Profile(name="silent", dispatch={"metadata": "silent"})  # the stub waits for the tester
 
 
 @pytest.fixture
@@ -90,26 +99,34 @@ def stub(tmp_path_factory):
         p.wait(30)
 
 
-def connect(agent="livetest-stub"):
-    return lambda room: tokens.connect(Agent(name=agent, url=URL), room, key=KEY, secret=SECRET)
+def connect(agent="livetest-stub", profile=None):
+    return lambda room: tokens.connect(Agent(name=agent, url=URL), room, profile, key=KEY, secret=SECRET)
 
 
-def run(db, tester_llm, scenario, agent="livetest-stub"):
+def voices():
+    return stt.stt(STT_URL, "moonshine-base", None), tts.tts(TTS_URL, "kokoro-7m", None, "af_msa")
+
+
+def run(db, tester_llm, scenario, agent="livetest-stub", voice=None, recordings=None, opening=None, profile=None):
+    """One test: the stub greets and the tester's LLM replies, unless `opening` (`--start-conversation`)."""
     room = f"livetest-{uuid.uuid4().hex[:8]}"
     n, = store.start_run(db, room, agent, None, [(scenario, room)])
 
     async def go():
         try:
-            await runner.run_text(db, n, scenario, room, connect(agent), tester_llm, KEY, SECRET)
+            await runner.run_test(db, n, scenario, room, connect(agent, profile), tester_llm, KEY, SECRET, voice,
+                                  recordings, opening)
         finally:
             await tester_llm.aclose()
+            for model in voice or ():
+                await model.aclose()
 
     asyncio.run(go())
     return store.result(db, n), store.events(db, n)
 
 
 def test_selection():
-    pool = [(n, Scenario(name=name, goal="g")) for n, name in [(1, "a"), (2, "b"), (4, "fix2"), (7, "all")]]
+    pool = [(n, Scenario(name=name, prompt="p")) for n, name in [(1, "a"), (2, "b"), (4, "fix2"), (7, "all")]]
     pick = lambda *items: [n for n, _ in runner.select(list(items), pool)]
     assert pick("1") == [1] and pick("b") == [2]
     assert pick("1-4") == [1, 2, 4]  # skips the removed 3
@@ -132,7 +149,7 @@ def test_run_ids():
 
 
 def test_logs_land_on_their_own_test(db):
-    s = Scenario(name="s", goal="g")
+    s = Scenario(name="s", prompt="p")
     a, b = store.start_run(db, "r", "agent", None, [(s, "ra"), (s, "rb")])
     log = logging.getLogger("livetest.test")
     log.setLevel(logging.INFO)
@@ -155,17 +172,21 @@ def test_logs_land_on_their_own_test(db):
 @selfhost
 def test_max_turns(db, stub, tester, caplog):
     caplog.set_level(logging.INFO)  # what the CLI's logging setup does
-    res, evs = run(db, tester("hello", "please use the tool", "thanks"), Scenario(name="s", goal="g", max_turns=3))
+    res, evs = run(db, tester("hello", "please use the tool", "thanks"), Scenario(name="s", prompt="p", max_turns=3))
     assert (res["status"], res["ended"], res["room"].startswith("livetest-"), res["passed"]) == ("done", "max_turns", True, 1)
     of = lambda kind: [d for _, _, t, d in evs if t == kind]
     assert [d["text"] for d in of("tester_turn")] == ["hello", "please use the tool", "thanks"]
     info = of("agent_info")[0]
     assert "Stub agent" in info["instructions"] and "lookup" in json.dumps(info["tools"])
     assert len(of("tool_execution_updated")) == 2  # started, ended: the tool's real duration
-    # No session_usage_updated: the stub runs no model, so it has no usage (Baymax's probes show it). The tester's adds up.
-    assert of("tester_turn")[0]["usage"] == {"input_tokens": 10, "input_cached_tokens": 0, "output_tokens": 2}
-    assert json.loads(res["usage"]) == {"agent": [], "tester": [{"kind": "llm", "provider": tester.url.split("/")[2],
-                                        "model": "fake", "input_tokens": 30, "input_cached_tokens": 0, "output_tokens": 6}]}
+    # The tester's LLM gets exactly the scenario's prompt and the agent's words: nothing livetest wrote.
+    assert tester.asked[0]["messages"] == [{"role": "system", "content": "p"},
+                                           {"role": "user", "content": "Hi, how can I help?"}]
+    # The stub's LLM is fake, so its usage has no llm (with voice tests on, only its STT); the tester's adds up.
+    usage = json.loads(res["usage"])
+    assert "llm" not in {u["kind"] for u in usage["agent"]}
+    assert usage["tester"] == [{"kind": "llm", "provider": tester.url.split("/")[2], "model": "fake",
+                                "input_tokens": 30, "input_cached_tokens": 0, "output_tokens": 6}]
     assert {"framework", "session_state", "chat_history", "seen", "conversation_item_added"} <= {t for _, _, t, _ in evs}
     assert any(src == "log" for _, src, _, _ in evs)
     # The agent's replies reach the tester as the other side of its conversation.
@@ -174,19 +195,19 @@ def test_max_turns(db, stub, tester, caplog):
 
 @selfhost
 def test_agent_leaves(db, stub, tester):
-    res, _ = run(db, tester("hi", "bye", "still there?"), Scenario(name="s", goal="g", max_turns=5))
+    res, _ = run(db, tester("hi", "bye", "still there?"), Scenario(name="s", prompt="p", max_turns=5))
     assert (res["status"], res["ended"]) == ("done", "agent_left")
 
 
 @selfhost
 def test_max_minutes(db, stub, tester):
-    res, _ = run(db, tester(*["please use the tool"] * 20), Scenario(name="s", goal="g", max_turns=20, max_minutes=0.05))
+    res, _ = run(db, tester(*["please use the tool"] * 20), Scenario(name="s", prompt="p", max_turns=20, max_minutes=0.05))
     assert (res["status"], res["ended"]) == ("done", "max_minutes")
 
 
 @selfhost
 def test_never_joined(db, tester):  # waits the full 30 s
-    res, evs = run(db, tester(), Scenario(name="s", goal="g"), agent="nobody-livetest")
+    res, evs = run(db, tester(), Scenario(name="s", prompt="p"), agent="nobody-livetest")
     assert res["status"] == "never_joined" and "never joined" in res["ended"]
 
 
@@ -198,9 +219,9 @@ def test_parallel_run_from_the_cli(tmp_path, stub, tester, monkeypatch, capsys):
     monkeypatch.setenv("LIVETEST_AGENT_SECRET_LIVETEST_STUB", SECRET)
     cli = lambda *a: main(["--db", str(tmp_path / "t.db"), *a])
     assert cli("agent", "add", "--name", "livetest-stub", "--url", URL) == 0
-    assert cli("plugin", "add", "--plugin", "fake", "--base-url", tester.url, "--model", "fake") == 0
+    assert cli("plugin", "add", "--kind", "llm", "--plugin", "fake", "--base-url", tester.url, "--model", "fake") == 0
     for s in ("a", "b", "c"):  # one turn each: the stub's canned replies would count as a loop over two
-        assert cli("scenario", "add", "--scenario", s, "--goal", "g", "--max-turns", "1") == 0
+        assert cli("scenario", "add", "--scenario", s, "--prompt", "p", "--max-turns", "1") == 0
     assert cli("run", "start", "--name", "livetest-stub", "--scenario", "all", "--parallel", "2", "-y") == 0
     capsys.readouterr()
     assert cli("run", "list", "--json") == 0
@@ -212,7 +233,7 @@ def test_parallel_run_from_the_cli(tmp_path, stub, tester, monkeypatch, capsys):
 @pytest.mark.parametrize("line", ["please fail", "be slow"])
 def test_agent_doesnt_reply(db, stub, tester, line):
     """The agent errors out of a turn, or takes over 10 s to start: the test ends there and fails; not a livetest error."""
-    res, _ = run(db, tester("hello", line, "anyone there?"), Scenario(name="s", goal="g", max_turns=3))
+    res, _ = run(db, tester("hello", line, "anyone there?"), Scenario(name="s", prompt="p", max_turns=3))
     assert (res["status"], res["ended"], res["passed"]) == ("done", "no_reply", 0)
     silent = next(c for c in json.loads(res["checks"]) if c["check"] == "silent")
     assert silent["actual"] == [line]
@@ -230,8 +251,8 @@ def test_ctrl_c_stops_the_run(tmp_path, stub, tester, monkeypatch):
     path = tmp_path / "t.db"
     cli = lambda *a: main(["--db", str(path), *a])
     assert cli("agent", "add", "--name", "livetest-stub", "--url", URL) == 0
-    assert cli("plugin", "add", "--plugin", "fake", "--base-url", tester.url, "--model", "fake") == 0
-    assert cli("scenario", "add", "--scenario", "long", "--goal", "g", "--max-turns", "20") == 0
+    assert cli("plugin", "add", "--kind", "llm", "--plugin", "fake", "--base-url", tester.url, "--model", "fake") == 0
+    assert cli("scenario", "add", "--scenario", "long", "--prompt", "p", "--max-turns", "20") == 0
     tester(*["please use the tool"] * 40)
 
     def press_ctrl_c():  # once the first test is talking; the same signal a real Ctrl+C sends
@@ -252,7 +273,7 @@ def test_ctrl_c_stops_the_run(tmp_path, stub, tester, monkeypatch):
 @selfhost
 def test_stop(db, stub, tester):
     """Stopping a run: the running test ends cleanly and keeps its events; the queued one never starts."""
-    s = Scenario(name="s", goal="g", max_turns=20)
+    s = Scenario(name="s", prompt="p", max_turns=20)
     tests = [(s, f"livetest-{uuid.uuid4().hex[:8]}") for _ in range(2)]
     first, second = store.start_run(db, "stop-me", "livetest-stub", None, tests)
     tester_llm = tester(*["please use the tool"] * 20)
@@ -271,3 +292,67 @@ def test_stop(db, stub, tester):
     assert (a["status"], a["passed"], b["status"]) == ("stopped", None, "stopped")
     assert store.events(db, first) and not store.events(db, second)
     assert store.runs(db, "stop-me")[0]["status"] == "stopped"
+
+
+@voiced
+def test_voice(db, stub, tester, tmp_path):
+    """The same conversation by voice: the tester hears the greeting out, then its TTS speaks, the agent's STT hears it
+    and back. Recorded."""
+    import av
+
+    res, evs = run(db, tester("hello", "please use the tool", "thanks"), Scenario(name="s", prompt="p", max_turns=3),
+                   voice=voices(), recordings=tmp_path)
+    assert (res["status"], res["ended"]) == ("done", "max_turns"), res
+    of = lambda kind: [d for _, _, t, d in evs if t == kind]
+    assert [d["text"] for d in of("tester_turn")] == ["hello", "please use the tool", "thanks"]  # no 4th turn
+    # The tester's STT heard the agent's TTS (Moonshine sometimes hears "canned reply" as "Can Reply").
+    assert any("reply" in d["text"].lower() for d in of("tester_heard"))
+    assert of("user_input_transcribed")  # and the agent's STT heard the tester
+    assert len(of("tool_execution_updated")) == 2  # "use the tool", by voice
+    assert res["passed"] == 1, res["checks"]  # latency runs from the end of the tester's speech
+    greeted = next(ts for ts, _, t, d in evs if t == "conversation_item_added"
+                   and d[t]["item"].get("message", {}).get("role") == "ASSISTANT")
+    assert greeted < next(ts for ts, _, t, _ in evs if t == "tester_turn")  # no talking over the greeting
+    assert "help" in json.dumps(tester.asked[0]["messages"]).lower()  # heard live, or from the agent's history
+    assert Path(res["recording"]) == tmp_path / "test-1.ogg" and res["recording_started_at"]
+    with av.open(res["recording"]) as f:  # stereo: channel 0 the agent as heard, 1 the tester as spoken
+        assert f.streams.audio[0].channels == 2 and f.duration / av.time_base > 3
+    assert {u["kind"] for u in json.loads(res["usage"])["tester"]} >= {"llm", "tts"}
+
+
+@voiced
+def test_voice_without_recording(db, stub, tester):
+    res, _ = run(db, tester("hello"), Scenario(name="s", prompt="p", max_turns=1), voice=voices())
+    assert (res["status"], res["recording"]) == ("done", None)
+
+
+@voiced
+def test_stt_must_stream():
+    """A server without a realtime websocket (here the TTS one) is refused as a tester STT."""
+    with pytest.raises(ConnectionError, match="stream"):
+        asyncio.run(stt.check(TTS_URL, "m", None))
+
+
+@selfhost
+def test_agent_never_greets(db, stub, tester):
+    res, _ = run(db, tester(), Scenario(name="s", prompt="p"), profile=SILENT)
+    assert (res["status"], res["ended"], res["passed"]) == ("done", "no_greeting", 0)
+    assert not tester.asked  # the tester never spoke
+
+
+@selfhost
+def test_exact_opening(db, stub, tester):
+    res, evs = run(db, tester("thanks"), Scenario(name="s", prompt="p", max_turns=2), opening="please use the tool",
+                   profile=SILENT)
+    assert [d["text"] for _, _, t, d in evs if t == "tester_turn"] == ["please use the tool", "thanks"]
+    assert len(tester.asked) == 1  # the opening needed no LLM
+
+
+@voiced
+def test_voice_exact_opening(db, stub, tester):
+    res, evs = run(db, tester(), Scenario(name="s", prompt="p", max_turns=1), voice=voices(),
+                   opening="please use the tool", profile=SILENT)
+    assert (res["status"], res["ended"]) == ("done", "max_turns"), res
+    assert [d["text"] for _, _, t, d in evs if t == "tester_turn"] == ["please use the tool"]
+    assert len([1 for _, _, t, _ in evs if t == "tool_execution_updated"]) == 2  # said, heard, called
+    assert not tester.asked

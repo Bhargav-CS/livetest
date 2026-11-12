@@ -34,5 +34,5 @@ def test_reply_streams():
 def test_plugin_add_checks_for_real(tmp_path, monkeypatch):
     if KEY:
         monkeypatch.setenv("LIVETEST_KEY_LIVE", KEY)
-    assert main(["--db", str(tmp_path / "t.db"), "plugin", "add", "--plugin", "live",
+    assert main(["--db", str(tmp_path / "t.db"), "plugin", "add", "--kind", "llm", "--plugin", "live",
                  "--base-url", URL, "--model", MODEL]) == 0
