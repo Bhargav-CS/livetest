@@ -23,6 +23,7 @@ from livetest.platform import logging as logs
 from livetest.platform.db import DEFAULT_PATH
 from livetest.runtime import runner, session, store, tokens
 from livetest.runtime.models import Agent, Participant, Plugin, Profile, Scenario, key_var
+from livetest.ui import report
 
 ISSUES = "https://github.com/Bhargav-CS/livetest/issues"
 LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -483,6 +484,19 @@ def cmd_run_stop(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report_create(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    run = pick_run(db, args)
+    try:
+        page = report.create(db, run, args.test)
+    except ValueError as e:
+        raise Fail(e) from None
+    out = args.output or Path(f"run-{run['id']}{f'_test-{args.test}' if args.test else ''}_report.html")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(page, encoding="utf-8")
+    print(f"wrote {out} ({out.stat().st_size // 1024:,} KB)")
+    return 0
+
+
 def cmd(sub, name: str, func, help: str, *examples: str, **kw) -> argparse.ArgumentParser:
     """One command or group. Every help screen ends with examples (CLI standard rule 4); func=None prints help."""
     p = sub.add_parser(name, help=help, description=kw.pop("description", help), **kw,
@@ -529,6 +543,7 @@ manage:
 
 test:
   run         start, list, follow or stop runs: scenarios against an agent
+  report      write a run's results as one HTML file that opens offline
 """
 
 
@@ -697,6 +712,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run", help="a run's id, or latest")
     p.add_argument("--test", type=int, metavar="N", help="only this test")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+
+    actions = cmd(sub, "report", None, "Write a run's results as one HTML file that opens offline.",
+                  "livetest report create --run latest", "livetest report create --run 17 --test 4"
+                  ).add_subparsers(dest="action", title="actions", metavar="<action>")
+    p = cmd(actions, "create", cmd_report_create, "write one self-contained HTML report",
+            "livetest report create --run 17                # ./run-17_report.html",
+            "livetest report create --run 17 --test 4       # ./run-17_test-4_report.html",
+            "livetest report create --run latest --output ~/Desktop/nightly.html",
+            description="Write one HTML file holding everything livetest recorded for a run, or one test: verdicts,\n"
+                        "checks, transcripts, timelines, traces, logs, usage, what the agent showed, and the recordings.\n"
+                        "It opens in any browser, offline. It contains the agent's system prompt and recordings, never keys.")
+    p.add_argument("--run", help="a run's id, or latest")
+    p.add_argument("--test", type=int, metavar="N", help="only this test")
+    p.add_argument("--output", type=Path, metavar="FILE", help="where to write it (default: ./run-<run>_report.html)")
 
     for stream in (sys.stdout, sys.stderr):  # an agent's text can be any character; a cp1252 console shows ?, not a crash
         stream.reconfigure(errors="replace")
