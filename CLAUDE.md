@@ -7,7 +7,7 @@ livetest is a black-box testing tool for **any** LiveKit agent
 - **Any host:** works on LiveKit Cloud and on self-hosted LiveKit servers.
 - **Distribution:** a standalone tool installed from the GitHub README (sh / iex / winget),
 
-The code is in [livetest/](livetest/), layered platform / runtime / integrations (see "Code structure" in the plan). The voice prototype is [dev/agent.py](dev/agent.py). Read these two first:
+The code is in [livetest/](livetest/), layered platform / runtime / integrations (see "Code structure" in the plan). Read these two first:
 
 - [docs/livetest_plan.md](docs/livetest_plan.md): what we're building and its status. Tick the status boxes as features land.
 - [docs/livekit_tester_research.md](docs/livekit_tester_research.md): the technical findings.
@@ -22,6 +22,7 @@ The code is in [livetest/](livetest/), layered platform / runtime / integrations
 6. The git hooks in `.git/hooks` enforce the branch docs:
    - `pre-commit` blocks committing `context_*.md` / `decisions_*.md`. They are local-only and never reach `main`.
    - `post-checkout` parks them in `.git/branch-docs/` on a branch switch and restores the ones matching the new branch.
+7. **Until v0.1 is released, nobody has installed livetest: change things in place.** No migration steps, compatibility shims, renamed-flag aliases or "was / now" comments. Edit the schema, models, CLI and tests so they read as if they had always been this way. After a schema change, delete `~/.livetest/livetest.db` and set it up again.
 
 # Context
 

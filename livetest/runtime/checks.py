@@ -22,18 +22,17 @@ def _args(text: str | None):
         return text
 
 
-def usage(events, provider: str, model: str) -> dict:
+def usage(events) -> dict:
     """Counts, no cost: the agent's models from its last session usage (it's cumulative), each as {kind, provider,
-    model, ...counts as reported}; the tester's LLM (`provider`, `model`) summed over its turns. Nothing reported, nothing listed."""
-    agent, turns = [], []
+    model, ...counts as reported}; the tester's from its `tester_usage` event, written once as the test ends. Nothing
+    reported, nothing listed."""
+    agent, tester = [], []
     for _, _, kind, data in events:
         if kind == "session_usage_updated":
             agent = [{"kind": k, **v} for m in data[kind].get("usage", {}).get("model_usage", []) for k, v in m.items()]
-        elif kind == "tester_turn" and "usage" in data:
-            turns.append(data["usage"])
-    tester = {"kind": "llm", "provider": provider, "model": model} | {
-        k: sum(t[k] for t in turns) for k in ("input_tokens", "input_cached_tokens", "output_tokens")}
-    return {"agent": agent, "tester": [tester] if turns else []}
+        elif kind == "tester_usage":
+            tester = data["usage"]
+    return {"agent": agent, "tester": tester}
 
 
 def evaluate(scenario: Scenario, ended: str, events) -> list[dict]:
@@ -44,7 +43,7 @@ def evaluate(scenario: Scenario, ended: str, events) -> list[dict]:
         if kind == "tester_turn":
             turns.append({"said": data["text"], "at": ts, "gap": None})
         elif kind == "agent_state_changed" and ev.get("new_state") == "AS_SPEAKING" and turns and turns[-1]["gap"] is None:
-            # ponytail: tester_turn ts is when the text is sent; voice mode (module 9) needs when the tester stops speaking
+            # tester_turn's ts: text sent (text mode), or the tester done speaking (voice)
             turns[-1]["gap"] = ts - turns[-1]["at"]
         elif kind == "conversation_item_added" and (m := ev["item"].get("message", {})).get("role") == "ASSISTANT":
             replies.append(" ".join(c.get("text", "") for c in m.get("content", [])))
@@ -54,7 +53,8 @@ def evaluate(scenario: Scenario, ended: str, events) -> list[dict]:
     calls = [{"name": c["name"], "args": _args(c.get("arguments")), "output": outputs.get(c["call_id"], {}).get("output"),
               "error": outputs.get(c["call_id"], {}).get("is_error", False)} for c in calls]
 
-    unanswered = [t["said"] for t in turns if t["gap"] is None or t["gap"] > REPLY_S]
+    unanswered = (["(the agent's greeting)"] if ended == "no_greeting" else []) + [
+        t["said"] for t in turns if t["gap"] is None or t["gap"] > REPLY_S]
     # ponytail: 90% alike back to back catches word-for-word loops; v0.2 likely wants a semantic or windowed rule
     loops = [[a, b] for a, b in zip(replies, replies[1:]) if a and SequenceMatcher(None, a, b).ratio() >= 0.9]
     out = [

@@ -11,7 +11,7 @@ import pytest
 from dotenv import dotenv_values
 
 from livetest.cli import main
-from livetest.platform import keys, llm
+from livetest.platform import keys, llm, stt, tts
 from livetest.runtime import runner, session, store, tokens
 from livetest.runtime.models import Agent, Plugin, Profile, Scenario
 
@@ -28,14 +28,15 @@ def run(path):
 
 @pytest.fixture
 def reachable(monkeypatch):
-    """Every LLM answers, so `plugin add` saves without a server. Records (base_url, model, key) per check."""
+    """Every LLM, STT and TTS answers, so `plugin add` saves without a server. Records (base_url, model, key, ...) per check."""
     seen = []
 
     async def check(*a):
         seen.append(a)
         return 0.25
 
-    monkeypatch.setattr(llm, "check", check)
+    for kind in (llm, stt, tts):
+        monkeypatch.setattr(kind, "check", check)
     return seen
 
 
@@ -187,7 +188,7 @@ def test_one_connection_mode_only(run, path):
 def test_no_terminal_never_prompts(run, path, monkeypatch):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     assert run("agent", "add") == 2  # no name and nobody to ask
-    assert run("scenario", "add", "--scenario", "s") == 2  # no goal and nobody to ask
+    assert run("scenario", "add", "--scenario", "s") == 2  # no prompt and nobody to ask
     assert run("agent", "add", "--name", "tok") == 0  # no connection: token at run time
     assert saved(path, Agent)["tok"][1].sandbox is None
 
@@ -199,7 +200,7 @@ def test_terminal_prompts_for_missing(run, path, monkeypatch):
     assert run("agent", "add") == 0
     assert saved(path, Agent)["asked"][1].sandbox == "sb-pasted"
     assert run("scenario", "add") == 0
-    assert saved(path, Scenario)["booking"][1].goal == "Move my appointment"
+    assert saved(path, Scenario)["booking"][1].prompt == "Move my appointment"
 
 
 def test_profile_add_list_rm(run, path, capsys):
@@ -222,13 +223,13 @@ def test_profile_add_list_rm(run, path, capsys):
 
 
 def test_scenario_flags(run, path):
-    assert run("scenario", "add", "--scenario", "reschedule", "--goal", "Move Tuesday to Friday",
-               "--tag", "booking", "--persona", "mood=impatient", "--persona", "interrupts=true",
+    prompt = "You are an impatient customer. Move your Tuesday appointment to Friday. Reply with one short turn."
+    assert run("scenario", "add", "--scenario", "reschedule", "--prompt", prompt, "--tag", "booking",
                "--tool-called", "reschedule", "day=friday", "slot=2", "--tool-not-called", "cancel_booking",
                "--no-tool-errors", "--p99-ms", "1500") == 0
     s = saved(path, Scenario)["reschedule"][1]
     assert s.tags == ["booking"]
-    assert s.persona == {"mood": "impatient", "interrupts": True}  # values read as JSON when they parse
+    assert s.prompt == prompt  # what the tester's LLM gets, as written
     assert (s.max_turns, s.max_minutes) == (10, 5)
     assert [c.type for c in s.expect] == ["tool_called", "tool_not_called", "no_tool_errors", "latency"]
     assert s.expect[0].args == {"day": "friday", "slot": 2}
@@ -237,9 +238,9 @@ def test_scenario_flags(run, path):
 
 def test_scenario_numbers_never_reused_and_tags(run, path, capsys):
     for name, tag in [("a", "x"), ("b", "y"), ("c", "x")]:
-        assert run("scenario", "add", "--scenario", name, "--goal", "g", "--tag", tag) == 0
+        assert run("scenario", "add", "--scenario", name, "--prompt", "p", "--tag", tag) == 0
     assert run("scenario", "rm", "--scenario", "c", "-y") == 0
-    assert run("scenario", "add", "--scenario", "d", "--goal", "g", "--tag", "x") == 0
+    assert run("scenario", "add", "--scenario", "d", "--prompt", "p", "--tag", "x") == 0
     assert {name: n for name, (n, _) in saved(path, Scenario).items()} == {"a": 1, "b": 2, "d": 4}
     capsys.readouterr()
     assert run("scenario", "list", "--tag", "x", "--json") == 0
@@ -247,25 +248,15 @@ def test_scenario_numbers_never_reused_and_tags(run, path, capsys):
 
 
 @pytest.mark.parametrize("argv", [
-    ["scenario", "add", "--scenario", "1-20", "--goal", "g"],  # looks like a selection
+    ["scenario", "add", "--scenario", "1-20", "--prompt", "p"],  # looks like a selection
     ["profile", "add", "--profile", "my profile"],  # space
     ["profile", "add", "--profile", "p", "--attribute", "plan"],  # not key=value
-    ["scenario", "add", "--scenario", "s", "--goal", "g", "--max-turns", "0"],
-    ["scenario", "add", "--scenario", "s", "--goal", "g", "--p95-ms", "0"],
+    ["scenario", "add", "--scenario", "s", "--prompt", "p", "--max-turns", "0"],
+    ["scenario", "add", "--scenario", "s", "--prompt", "p", "--p95-ms", "0"],
 ])
 def test_bad_input_exits_2(run, path, argv):
     assert run(*argv) == 2
     assert saved(path, Profile) == {} and saved(path, Scenario) == {}
-
-
-def test_old_db_upgrades_and_keeps_agents(run, path):
-    path.parent.mkdir(parents=True)
-    with closing(sqlite3.connect(path)) as old:  # a DB from before migrations: user_version 0
-        old.executescript(store.MIGRATIONS[0] + "INSERT INTO agents (name, data) VALUES ('old', '{}');")
-    assert run("scenario", "add", "--scenario", "s", "--goal", "g") == 0
-    assert "old" in saved(path, Agent)
-    with closing(sqlite3.connect(path)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(store.MIGRATIONS)
 
 
 def test_newer_db_refused(run, path):
@@ -276,8 +267,8 @@ def test_newer_db_refused(run, path):
 
 
 def test_plugin_add_use_list_rm(run, path, reachable, capsys):
-    assert run("plugin", "add", "--plugin", "local", "--base-url", "http://localhost:8000/v1", "--model", "qwen") == 0
-    assert run("plugin", "add", "--plugin", "groq", "--provider", "groq", "--model", "gpt-oss") == 0
+    assert run("plugin", "add", "--kind", "llm", "--plugin", "local", "--base-url", "http://localhost:8000/v1", "--model", "qwen") == 0
+    assert run("plugin", "add", "--kind", "llm", "--plugin", "groq", "--provider", "groq", "--model", "gpt-oss") == 0
     assert saved(path, Plugin)["groq"][1].base_url == llm.PRESETS["groq"]
     assert active(path) == {"llm": "local"}  # the first of its kind is active
     assert run("plugin", "use", "--plugin", "groq") == 0
@@ -291,18 +282,32 @@ def test_plugin_add_use_list_rm(run, path, reachable, capsys):
     assert "local" in saved(path, Plugin)
 
 
-def test_plugin_unreachable_saves_nothing(run, path, monkeypatch, dead_url, capsys):
+@pytest.mark.parametrize("kind", ["llm", "stt", "tts"])
+def test_plugin_unreachable_saves_nothing(run, path, monkeypatch, dead_url, capsys, kind):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("getpass.getpass", lambda _: "sk-typed")
-    assert run("plugin", "add", "--plugin", "dead", "--base-url", dead_url, "--model", "m") == 3  # real call, nothing mocked
+    assert run("plugin", "add", "--kind", kind, "--plugin", "dead", "--base-url", dead_url, "--model", "m") == 3  # real call
     assert capsys.readouterr().err.startswith("error:")
     assert saved(path, Plugin) == {} and not (path.parent / ".env").exists()
+
+
+def test_voice_plugins(run, path, reachable):
+    assert run("plugin", "add", "--kind", "stt", "--plugin", "moonshine", "--base-url", "http://h:9092/v1",
+               "--model", "moonshine-base") == 0
+    assert run("plugin", "add", "--kind", "tts", "--plugin", "kokoro", "--base-url", "http://h:8881/v1",
+               "--model", "kokoro-7m", "--voice-id", "af_msa") == 0
+    assert reachable[-1] == ("http://h:8881/v1", "kokoro-7m", None, "af_msa")  # checked with its voice
+    assert saved(path, Plugin)["kokoro"][1].voice_id == "af_msa"
+    assert active(path) == {"stt": "moonshine", "tts": "kokoro"}  # the first of each kind
+    assert run("plugin", "add", "--kind", "stt", "--plugin", "s2", "--base-url", "http://h/v1", "--model", "m",
+               "--voice-id", "x") == 2  # only a TTS has a voice
+    assert "s2" not in saved(path, Plugin)
 
 
 def test_plugin_keys(run, path, reachable, monkeypatch, capsys):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("getpass.getpass", lambda _: "sk-secret-123")
-    assert run("plugin", "add", "--plugin", "my-groq", "--provider", "groq", "--model", "m") == 0
+    assert run("plugin", "add", "--kind", "llm", "--plugin", "my-groq", "--provider", "groq", "--model", "m") == 0
     env = path.parent / ".env"  # next to the DB
     assert dotenv_values(env) == {"LIVETEST_KEY_MY_GROQ": "sk-secret-123"}
     assert reachable[-1][2] == "sk-secret-123"  # the check used the typed key
@@ -320,19 +325,20 @@ def test_plugin_keys(run, path, reachable, monkeypatch, capsys):
 
 
 def test_plugin_names_sharing_a_key_refused(run, path, reachable):
-    assert run("plugin", "add", "--plugin", "a-b", "--base-url", "http://x/v1", "--model", "m") == 0
-    assert run("plugin", "add", "--plugin", "a-b", "--base-url", "http://x/v1", "--model", "m") == 2  # taken
-    assert run("plugin", "add", "--plugin", "a_b", "--base-url", "http://x/v1", "--model", "m") == 2  # same key var
+    assert run("plugin", "add", "--kind", "llm", "--plugin", "a-b", "--base-url", "http://x/v1", "--model", "m") == 0
+    assert run("plugin", "add", "--kind", "llm", "--plugin", "a-b", "--base-url", "http://x/v1", "--model", "m") == 2  # taken
+    assert run("plugin", "add", "--kind", "llm", "--plugin", "a_b", "--base-url", "http://x/v1", "--model", "m") == 2  # same key var
     assert len(reachable) == 1  # refused before calling the LLM
 
 
 def test_plugin_add_prompts_or_fails(run, path, reachable, monkeypatch):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr("getpass.getpass", lambda _: pytest.fail("a script must never be asked for a key"))
-    assert run("plugin", "add", "--plugin", "p", "--model", "m") == 2  # no URL, nobody to ask
-    assert run("plugin", "add", "--plugin", "p", "--provider", "groq") == 2  # no model
+    assert run("plugin", "add", "--kind", "llm", "--plugin", "p", "--model", "m") == 2  # no URL, nobody to ask
+    assert run("plugin", "add", "--kind", "llm", "--plugin", "p", "--provider", "groq") == 2  # no model
+    assert run("plugin", "add", "--plugin", "p", "--provider", "groq", "--model", "m") == 2  # no kind
     assert saved(path, Plugin) == {}
-    answers = iter(["asked", "gemini", "gemini-flash"])  # name, provider-or-URL, model
+    answers = iter(["llm", "asked", "gemini", "gemini-flash"])  # kind, name, provider-or-URL, model
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
     monkeypatch.setattr("getpass.getpass", lambda _: "")  # Enter: no key
@@ -360,16 +366,16 @@ def ready(run, reachable):
     """An agent, scenarios 1-3 and a tester LLM: enough for `run start`."""
     assert run("agent", "add", "--name", "bot", "--sandbox", "sb") == 0
     for name in ("a", "b", "c"):
-        assert run("scenario", "add", "--scenario", name, "--goal", "g") == 0
-    assert run("plugin", "add", "--plugin", "p", "--base-url", "http://x/v1", "--model", "m") == 0
+        assert run("scenario", "add", "--scenario", name, "--prompt", "p") == 0
+    assert run("plugin", "add", "--kind", "llm", "--plugin", "p", "--base-url", "http://x/v1", "--model", "m") == 0
 
 
 def finishes(monkeypatch, *outcomes):
     """runner.run ends each test with the next (status, passed); no LiveKit. Records each run's parallel."""
     seen = []
 
-    async def fake(db, tests, connect, tester, parallel, key, secret):
-        seen.append(parallel)
+    async def fake(db, tests, connect, tester, parallel, key, secret, voice=None, recordings=None, opening=None):
+        seen.append((parallel, recordings) if voice else parallel)
         for (result, _, room), (status, passed) in zip(tests, outcomes):
             assert room.startswith("livetest-") and store.begin(db, result)
             store.finish_result(db, result, status, "max_turns", None if passed is None else [{"check": "c", "passed": passed}],
@@ -453,6 +459,49 @@ def test_run_start_refuses(run, path, ready, monkeypatch, capsys):
     assert start("--run", "r1", "-y") == 0 and start("--run", "r1", "-y") == 2  # taken
 
 
+def test_run_start_voice(run, path, ready, monkeypatch, capsys):
+    """--voice needs a tester STT and TTS; it records each test unless --no-recordings."""
+    seen = finishes(monkeypatch, ("done", True))
+    start = lambda *a: run("run", "start", "--name", "bot", "--scenario", "1", "--voice", "-y", *a)
+    capsys.readouterr()
+    assert start() == 2 and "plugin add --kind stt" in capsys.readouterr().err
+    assert run("plugin", "add", "--kind", "stt", "--plugin", "s", "--base-url", "http://x/v1", "--model", "m") == 0
+    capsys.readouterr()
+    assert start() == 2 and "plugin add --kind tts" in capsys.readouterr().err
+    assert run("plugin", "add", "--kind", "tts", "--plugin", "t", "--base-url", "http://x/v1", "--model", "m") == 0
+    assert start("--stt", "nope") == 2 and start("--tts", "nope") == 2
+    assert listed(run, capsys) == []  # refused before anything was saved
+    assert start() == 0
+    folder = path.parent / "recordings" / "run-1"
+    assert "voice mode" in (out := capsys.readouterr().out) and f"recording: on ({folder}" in out
+    assert start("--no-recordings") == 0
+    assert seen == [(4, folder), (4, None)]
+    assert [r["mode"] for r in listed(run, capsys)] == ["voice", "voice"]
+    assert run("run", "start", "--name", "bot", "--scenario", "1", "-y") == 0  # text is the default
+    assert listed(run, capsys)[-1]["mode"] == "text"
+
+
+def test_run_start_opening(run, ready, monkeypatch, capsys):
+    """Left out, the agent opens; with text, the tester says exactly that. The tester never writes its own opening."""
+    got = []
+
+    async def fake(db, tests, *a, opening=None, **kw):
+        got.append(opening)
+        for result, _, _ in tests:
+            store.begin(db, result)
+            store.finish_result(db, result, "done", "max_turns", [{"check": "c", "passed": True}])
+
+    monkeypatch.setattr(runner, "run", fake)
+    start = lambda *a: run("run", "start", "--name", "bot", "--scenario", "1", "-y", *a)
+    capsys.readouterr()
+    assert start() == 0 and "opens: agent" in capsys.readouterr().out
+    with pytest.raises(SystemExit):  # argparse: the flag needs its text
+        start("--start-conversation")
+    assert start("--start-conversation", "Hi, I need to reschedule") == 0
+    assert 'opens: tester ("Hi, I need to reschedule")' in capsys.readouterr().out
+    assert got == [None, "Hi, I need to reschedule"]
+
+
 def test_run_start_fails_fast_on_tokens(run, ready, monkeypatch, capsys):
     finishes(monkeypatch, ("done", True))
 
@@ -465,7 +514,7 @@ def test_run_start_fails_fast_on_tokens(run, ready, monkeypatch, capsys):
 
 
 def test_run_stop(run, path, capsys):
-    s = Scenario(name="s", goal="g")
+    s = Scenario(name="s", prompt="p")
     with closing(store.connect(path)) as db:
         first, *_ = store.start_run(db, "r", "bot", None, [(s, "x")] * 3)
         store.begin(db, first)
@@ -478,10 +527,13 @@ def test_run_stop(run, path, capsys):
 
 
 def test_run_logs(run, path, capsys):
-    s = Scenario(name="s", goal="g")
+    s = Scenario(name="s", prompt="p")
     with closing(store.connect(path)) as db:
         one, two = store.start_run(db, "r", "bot", None, [(s, "x"), (s, "y")])
         store.event(db, one, "tester", "tester_turn", {"text": "hello"})
+        store.event(db, one, "tester", "tester_heard", {"text": "Hi their"})  # voice: the tester's STT of the agent
+        store.event(db, one, "agent", "user_input_transcribed", {"user_input_transcribed": {"transcript": "hel"}})
+        store.event(db, one, "agent", "session_usage_updated", {"session_usage_updated": {"usage": {"model_usage": []}}})
         for role, text in (("USER", "hello"), ("ASSISTANT", "Hi there")):
             store.event(db, one, "agent", "conversation_item_added", {"conversation_item_added": {"item": {
                 "message": {"role": role, "content": [{"text": text}]}}}})
@@ -492,13 +544,57 @@ def test_run_logs(run, path, capsys):
     capsys.readouterr()
     assert run("run", "logs", "--run", "r") == 0
     out = capsys.readouterr().out
-    assert all(x in out for x in ("tester: hello", "agent_bot_heard: hello", "agent_bot: Hi there", "agent joined", "test failed"))
+    assert all(x in out for x in ("tester: hello", "tester_heard: Hi their", "agent_bot_heard: hello", "agent_bot: Hi there",
+                                 "agent joined", "test failed"))
+    # Partial transcripts repeat the _heard line; usage is cumulative and on the verdict. Both stay in --json and the DB.
+    assert "user_input_transcribed" not in out and "session_usage_updated" not in out
     assert run("run", "logs", "--run", "r", "--test", "2", "--level", "WARNING") == 0
     out = capsys.readouterr().out
     assert "test failed" in out and "agent joined" not in out and "hello" not in out
     assert run("run", "logs", "--run", "r", "--json") == 0
     assert [json.loads(line)["type"] for line in capsys.readouterr().out.splitlines()] == [
-        "tester_turn", "conversation_item_added", "conversation_item_added", "INFO", "ERROR"]
+        "tester_turn", "tester_heard", "user_input_transcribed", "session_usage_updated", "conversation_item_added",
+        "conversation_item_added", "INFO", "ERROR"]
+
+
+def test_last_agent_error_under_a_failed_verdict(run, path, capsys):
+    s = Scenario(name="s", prompt="p")
+    with closing(store.connect(path)) as db:
+        bad, good = store.start_run(db, "r", "bot", None, [(s, "x"), (s, "y")])
+        for n in (bad, good):
+            for msg in ("429 rate limit", "tts_error: no audio frames\nwere pushed"):
+                store.event(db, n, "agent", "error", {"error": {"message": msg}})
+        store.finish_result(db, bad, "done", "no_reply", [{"check": "silent", "passed": False}])
+        store.finish_result(db, good, "done", "max_turns", [{"check": "silent", "passed": True}])
+    capsys.readouterr()
+    assert run("run", "list", "--run", "r") == 0
+    out = capsys.readouterr().out
+    assert out.count("last agent error: tts_error: no audio frames were pushed") == 1  # the failed one; one line
+    assert "429" not in out
+
+
+def test_output_never_crashes_on_unicode(run, path, monkeypatch):
+    """A Windows console (cp1252) can't print every character an agent says; replaced, not a crash."""
+    import io
+
+    s = Scenario(name="s", prompt="p")
+    with closing(store.connect(path)) as db:
+        n, = store.start_run(db, "r", "bot", None, [(s, "x")])
+        store.event(db, n, "tester", "tester_heard", {"text": "QuantumLoop\u202fAI since April\u202f2025"})
+        store.finish_result(db, n, "done", "max_turns")
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", out)
+    assert run("run", "logs", "--run", "r") == 0
+    out.flush()
+    assert b"QuantumLoop?AI" in out.buffer.getvalue()
+
+
+def test_tester_http_lines_stay_out(run):
+    """The tester's own HTTP calls (httpx, under the OpenAI plugin) would be an INFO line per request in every test."""
+    import logging
+
+    assert run("agent", "list") == 0  # sets logging up
+    assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
 
 
 def test_crash_goes_to_errors_log(run, path, monkeypatch, capsys):

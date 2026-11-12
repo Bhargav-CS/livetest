@@ -18,7 +18,7 @@ from pathlib import Path
 import jwt
 from pydantic import ValidationError
 
-from livetest.platform import keys, llm
+from livetest.platform import keys, llm, stt, tts
 from livetest.platform import logging as logs
 from livetest.platform.db import DEFAULT_PATH
 from livetest.runtime import runner, session, store, tokens
@@ -26,6 +26,9 @@ from livetest.runtime.models import Agent, Participant, Plugin, Profile, Scenari
 
 ISSUES = "https://github.com/Bhargav-CS/livetest/issues"
 LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+# Left out of run logs' text view, kept in --json and the DB: partial transcripts repeat the _heard line, and usage is
+# cumulative (the verdict has the totals; the UI derives per-turn tokens from the stream).
+QUIET = {"user_input_transcribed", "session_usage_updated"}
 
 
 class Fail(Exception):
@@ -134,12 +137,12 @@ def cmd_init(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     # connect() in main() already created the DB; init is the friendly first step that says so.
     print(f"livetest is set up: {args.db}")
     # The agent first: it's what you came to test.
+    again = ["--db", str(args.db), *(["-v"] if args.verbose else [])]
     if not store.rows(db, Agent) and offer("agent", "the one you test", "agent add -h"):
-        if code := cmd_agent_add(db, argparse.Namespace(**vars(args), name=None, sandbox=None, endpoint=None, url=None)):
+        if code := main([*again, "agent", "add"]):
             return code
     if "llm" not in store.active(db) and offer("tester LLM", "the model that plays the user", "plugin add -h"):
-        return cmd_plugin_add(db, argparse.Namespace(**vars(args), plugin=None, kind="llm", provider=None,
-                                                     base_url=None, model=None))
+        return main([*again, "plugin", "add", "--kind", "llm"])
     return 0
 
 
@@ -152,25 +155,29 @@ def offer(what: str, why: str, see: str) -> bool:
 
 
 def cmd_plugin_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    kind = need(args.kind, "Kind (llm: thinks, stt: hears, tts: speaks): ", "--kind")
     name = need(args.plugin, "Plugin name: ", "--plugin")
     url = args.base_url or llm.PRESETS.get(args.provider) or need(
         None, f"Provider ({', '.join(llm.PRESETS)}) or a base URL, e.g.\n"
               "  https://api.together.xyz/v1   any OpenAI-compatible API\n"
               "  http://localhost:8000/v1      a server on your machine (vLLM; Ollama is http://localhost:11434/v1)\n"
               "Provider or base URL: ", "--base-url")
-    plugin = Plugin(name=name, kind=args.kind, base_url=llm.PRESETS.get(url, url),
-                    model=need(args.model, "Model: ", "--model"))
+    plugin = Plugin(name=name, kind=kind, base_url=llm.PRESETS.get(url, url),
+                    model=need(args.model, "Model: ", "--model"), voice_id=args.voice_id)
     free(db, Plugin, name)
     file = env_file(args)
     # ponytail: on Windows getpass reads the console even when stdin is redirected; fine until a CI box hangs on it
     key = getpass.getpass("API key (Enter for none): ").strip() if sys.stdin.isatty() else ""
     try:
-        secs = asyncio.run(llm.check(plugin.base_url, plugin.model, key or keys.get(file, key_var(name))))
+        check = {"llm": llm.check, "stt": stt.check, "tts": tts.check}[plugin.kind]
+        secs = asyncio.run(check(plugin.base_url, plugin.model, key or keys.get(file, key_var(name)),
+                                 *([plugin.voice_id] if plugin.voice_id else [])))
     except ConnectionError as e:
         print(f"error: {plugin.model} at {plugin.base_url} didn't answer ({e}); check the URL, model and key",
               file=sys.stderr)
         return 3
-    print(f"checked: first token in {secs:.1f} s")
+    print({"llm": f"checked: first token in {secs:.1f} s", "tts": f"checked: first audio in {secs:.1f} s"}
+          .get(plugin.kind, "checked: it streams"))
     save(db, plugin)
     if key:
         keys.save(file, key_var(name), key)
@@ -249,16 +256,15 @@ def cmd_scenario_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
         expect.append(given(type="latency", p95_ms=args.p95_ms, p99_ms=args.p99_ms))
     return save(db, Scenario(**given(
         name=need(args.scenario, "Scenario name: ", "--scenario"),
-        goal=need(args.goal, "Goal (what the tester wants done): ", "--goal"),
-        tags=args.tag, persona=pairs(args.persona), max_turns=args.max_turns, max_minutes=args.max_minutes,
-        expect=expect,
+        prompt=need(args.prompt, "Prompt (the tester LLM's whole system prompt): ", "--prompt"),
+        tags=args.tag, max_turns=args.max_turns, max_minutes=args.max_minutes, expect=expect,
     )))
 
 
 def summary(n: int, m) -> str:
     """One `list` line per agent, profile or scenario."""
     if isinstance(m, Scenario):
-        return f"{n:>4}  {m.name:<24} {','.join(m.tags):<16} {m.goal}"
+        return f"{n:>4}  {m.name:<24} {','.join(m.tags):<16} {' '.join(m.prompt.split())[:80]}"
     rest = m.model_dump(exclude={"name"}, exclude_none=True, exclude_defaults=True)
     if isinstance(m, Agent):  # at most one connection is set
         return f"{m.name:<24} " + (" ".join(f"{k} {v}" for k, v in rest.items()) or "token at run time")
@@ -302,7 +308,8 @@ def verdict(r: dict) -> str:
     failed = [c["check"] for c in json.loads(r["checks"] or "[]") if not c["passed"]]
     why = (", ".join(failed) or r["ended"] or "")[:200]  # an error's text can be a whole response body
     errors = f"  ({r['agent_errors']} agent errors)" if r["agent_errors"] else ""
-    return f"#{r['test']:<3} {json.loads(r['scenario'])['name']:<24} {outcome(r).upper():<16} {why}{errors}{used([r])}"
+    last = f"\n     last agent error: {' '.join(r['last_error'].split())[:200]}" if r["passed"] == 0 and r["last_error"] else ""
+    return f"#{r['test']:<3} {json.loads(r['scenario'])['name']:<24} {outcome(r).upper():<16} {why}{errors}{used([r])}{last}"
 
 
 def used(results: list[dict]) -> str:
@@ -323,8 +330,8 @@ def run_line(r: dict) -> str:
 
 def event_line(agent: str, test: int, ts: float, source: str, kind: str, data: dict) -> str:
     ev = data.get(kind) or {}  # session-host events nest under their own name
-    if kind == "tester_turn":
-        what = f"tester: {data['text']}"
+    if kind in ("tester_turn", "tester_heard"):  # tester_heard: voice, the tester's STT of the agent
+        what = f"{kind.removesuffix('_turn')}: {data['text']}"
     elif m := (ev.get("item") or {}).get("message"):  # a USER item is what the agent took in (voice: what its STT heard)
         what = f"agent_{agent}{'_heard' if m['role'] == 'USER' else ''}: " + " ".join(c.get("text", "") for c in m.get("content", []))
     elif source == "log":
@@ -356,9 +363,8 @@ def cmd_run_start(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     if args.parallel < 1:
         raise Fail("--parallel must be 1 or more")
     profile = find(db, Profile, args.profile) if args.profile else None
-    name = args.llm or os.environ.get("LIVETEST_LLM")  # flag > env > the active one
-    if not (plugin := find(db, Plugin, name) if name else store.active(db).get("llm")):
-        raise Fail("no tester LLM yet; see: livetest plugin add -h")
+    plugin = tester_plugin(db, "llm", args.llm)
+    voice = (tester_plugin(db, "stt", args.stt), tester_plugin(db, "tts", args.tts)) if args.voice else ()
     token = args.token or os.environ.get("LIVETEST_TOKEN")
     if token and len(tests) > 1:
         a = agent.name
@@ -382,22 +388,32 @@ def cmd_run_start(db: sqlite3.Connection, args: argparse.Namespace) -> int:
         return 3
     rooms = ([jwt.decode(token, options={"verify_signature": False}).get("video", {}).get("room", "")] if token  # its room
              else [f"livetest-{run}-{n}-{uuid.uuid4().hex[:6]}" for n in range(1, len(tests) + 1)])
-    print(f"run id: {run}\n{agent.name}: {len({n for n, _ in tests})} scenarios, {len(tests)} tests, text mode, "
-          f"{args.parallel} in parallel, profile {profile.name if profile else 'none'}, tester llm {plugin.name}")
+    folder = args.db.parent / "recordings" / f"run-{run}" if voice and args.recordings else None
+    print(f"run id: {run}\n{agent.name}: {len({n for n, _ in tests})} scenarios, {len(tests)} tests, "
+          f"{'voice' if voice else 'text'} mode, {args.parallel} in parallel, profile {profile.name if profile else 'none'}, "
+          f"tester {', '.join(f'{p.kind} {p.name}' for p in (plugin, *voice))}"
+          + (f"\nrecording: {f'on ({folder}, one file per test)' if folder else 'off'}" if voice else "")
+          + "\nopens: " + (f'tester ("{args.start_conversation}")' if args.start_conversation else "agent"))
     if not confirm("continue?", args):
         print("cancelled")
         return 0
 
-    ids = store.start_run(db, run, agent.name, profile, [(s, room) for (_, s), room in zip(tests, rooms)])
+    ids = store.start_run(db, run, agent.name, profile, [(s, room) for (_, s), room in zip(tests, rooms)],
+                          "voice" if voice else "text")
     print(f"running; verdicts print when it ends, Ctrl+C stops it. Follow it: livetest run logs --run {run}", flush=True)
 
     async def go() -> None:
-        tester = llm.llm(plugin.base_url, plugin.model, keys.get(file, key_var(plugin.name)))
+        key_of = lambda p: keys.get(file, key_var(p.name))
+        tester = llm.llm(plugin.base_url, plugin.model, key_of(plugin))
+        ears_mouth = (stt.stt(voice[0].base_url, voice[0].model, key_of(voice[0])),
+                      tts.tts(voice[1].base_url, voice[1].model, key_of(voice[1]), voice[1].voice_id)) if voice else None
         try:
             await runner.run(db, [(i, s, room) for i, (_, s), room in zip(ids, tests, rooms)],
-                             connect, tester, args.parallel, key, secret)
+                             connect, tester, args.parallel, key, secret, ears_mouth, folder,
+                             opening=args.start_conversation)
         finally:
-            await tester.aclose()
+            for model in (tester, *(ears_mouth or ())):
+                await model.aclose()
 
     interrupted = False
     try:
@@ -408,6 +424,8 @@ def cmd_run_start(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     found = store.results(db, run)
     print("\n".join(map(verdict, found)))
     print(f"run {run}: " + ", ".join(f"{n} {w}" for w, n in Counter(map(outcome, found)).items()) + used(found))
+    if any(r["ended"] == "no_greeting" for r in found):
+        print('the agent never greeted; if the tester should open, pass --start-conversation "<its first line>"')
     if errored := [r["test"] for r in found if r["status"] == "error"]:
         print(f"test {', '.join(map(str, errored))} hit an error; see: livetest run logs --run {run} --test {errored[0]}\n"
               f"tracebacks are in {errors_file(args)}; if it looks like a livetest bug, report it with "
@@ -418,6 +436,17 @@ def cmd_run_start(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     if statuses & {"never_joined", "no_session_host"}:
         return 3
     return 1 if "error" in statuses or any(r["passed"] == 0 for r in found) else 0
+
+
+def tester_plugin(db: sqlite3.Connection, kind: str, name: str | None) -> Plugin:
+    """The tester's LLM / STT / TTS: flag > LIVETEST_<KIND> > the active one."""
+    if not (name := name or os.environ.get(f"LIVETEST_{kind.upper()}")):
+        if found := store.active(db).get(kind):
+            return found
+        raise Fail(f"no tester {kind.upper()} yet; see: livetest plugin add --kind {kind} -h")
+    if (found := find(db, Plugin, name)).kind != kind:
+        raise Fail(f"'{name}' is a {found.kind} plugin, not {kind}; see: livetest plugin list")
+    return found
 
 
 def cmd_run_list(db: sqlite3.Connection, args: argparse.Namespace) -> int:
@@ -432,6 +461,8 @@ def cmd_run_logs(db: sqlite3.Connection, args: argparse.Namespace) -> int:
         for rowid, test, ts, source, kind, data in store.run_events(db, run["id"], args.test, after):
             after = rowid
             if source == "log" and LEVELS.index(kind) < LEVELS.index(args.level):
+                continue
+            if kind in QUIET and not args.json:
                 continue
             print(json.dumps({"test": test, "ts": ts, "source": source, "type": kind, "data": data}) if args.json
                   else event_line(run["agent"], test, ts, source, kind, data), flush=True)
@@ -493,8 +524,8 @@ get started:
 manage:
   agent       add, list or remove the agents you test
   profile     add, list or remove who the tester is, as the agent sees them
-  scenario    add, list or remove what the tester tries to get done
-  plugin      add, list, remove or pick the LLM the tester thinks with
+  scenario    add, list or remove what the tester is told to do, and what to check
+  plugin      add, list, remove or pick the tester's LLM, STT and TTS
 
 test:
   run         start, list, follow or stop runs: scenarios against an agent
@@ -558,19 +589,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dispatch-metadata", type=metadata, metavar="JSON|TEXT", help="the agent reads ctx.job.metadata")
     list_and_remove(actions, Profile)
 
-    actions = group(sub, Scenario, "Add, list or remove scenarios: what the tester tries to get done.",
-                    "livetest scenario add --scenario reschedule --goal 'Move my Tuesday slot to Friday'",
+    actions = group(sub, Scenario, "Add, list or remove scenarios: the tester's prompt and what to check.",
+                    "livetest scenario add --scenario reschedule --prompt 'You want your Tuesday slot moved to Friday.'",
                     "livetest scenario list --tag booking", "livetest scenario remove --scenario reschedule")
     p = cmd(actions, "add", cmd_scenario_add, "add a scenario",
-            "livetest scenario add --scenario reschedule --goal 'Move my Tuesday slot to Friday'",
-            "livetest scenario add --scenario angry --goal 'Get a refund' --tag billing --persona mood=angry "
-            "--tool-called issue_refund amount=40 --tool-not-called cancel_account --no-tool-errors --p95-ms 1500",
-            description="Add a scenario. Values after = are read as JSON when they parse (42, true), else as text.\n"
-                        "Each scenario gets a number, never reused, for run start --scenario.")
+            "livetest scenario add --scenario reschedule --prompt 'You want your Tuesday slot moved to Friday.'",
+            "livetest scenario add --scenario angry --tag billing --prompt 'You are an angry customer who wants a "
+            "refund. Reply with one short turn.' --tool-called issue_refund amount=40 --tool-not-called cancel_account "
+            "--no-tool-errors --p95-ms 1500",
+            description="Add a scenario. --prompt is the tester LLM's whole system prompt, sent as written: say who it\n"
+                        "plays, what it wants and how it talks. Values after = are read as JSON when they parse\n"
+                        "(42, true), else as text. Each scenario gets a number, never reused, for run start --scenario.")
     p.add_argument("--scenario", help="its name")
-    p.add_argument("--goal", help="what the tester is trying to get done")
+    p.add_argument("--prompt", help="the tester LLM's whole system prompt")
     p.add_argument("--tag", action="append", help="repeatable; groups scenarios for scenario list --tag")
-    p.add_argument("--persona", action="append", metavar="KEY=VALUE", help="how the tester behaves, repeatable")
     p.add_argument("--max-turns", type=int, metavar="N", help="end the test after this many turns (default: 10)")
     p.add_argument("--max-minutes", type=float, metavar="N", help="end the test after this long (default: 5)")
     p.add_argument("--tool-called", nargs="+", action="append", metavar=("NAME", "KEY=VALUE"),
@@ -583,19 +615,25 @@ def main(argv: list[str] | None = None) -> int:
     list_and_remove(actions, Scenario)
     actions.choices["list"].add_argument("--tag", help="only scenarios with this tag")
 
-    actions = group(sub, Plugin, "Add, list, remove or pick plugins: the LLM the tester thinks with. One per kind is active.",
-                    "livetest plugin add --plugin local-qwen --base-url http://localhost:8000/v1 --model Qwen/Qwen3.5-2B",
+    actions = group(sub, Plugin, "Add, list, remove or pick plugins: the LLM the tester thinks with, and the STT and TTS it hears\n"
+                    "and speaks with in voice mode. One per kind is active.",
+                    "livetest plugin add --kind llm --plugin local-qwen --base-url http://localhost:8000/v1 --model Qwen/Qwen3.5-2B",
                     "livetest plugin use --plugin my-groq", "livetest plugin list")
     p = cmd(actions, "add", cmd_plugin_add, "add a plugin; checks that it answers first",
             "livetest plugin add                      # asks for everything",
-            "livetest plugin add --plugin local-qwen --base-url http://localhost:8000/v1 --model Qwen/Qwen3.5-2B",
-            "livetest plugin add --plugin my-groq --provider groq --model openai/gpt-oss-120b",
-            "livetest plugin add --plugin together --base-url https://api.together.xyz/v1 --model meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            "livetest plugin add --kind llm --plugin local-qwen --base-url http://localhost:8000/v1 --model Qwen/Qwen3.5-2B",
+            "livetest plugin add --kind llm --plugin my-groq --provider groq --model openai/gpt-oss-120b",
+            "livetest plugin add --kind llm --plugin together --base-url https://api.together.xyz/v1 --model meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            "livetest plugin add --kind stt --plugin moonshine --base-url http://localhost:9092/v1 --model moonshine-base",
+            "livetest plugin add --kind tts --plugin kokoro --base-url http://localhost:8881/v1 --model kokoro-7m --voice-id af_msa",
             description="Add a plugin: any OpenAI-compatible server. At a terminal it asks for the API key (hidden) and\n"
                         "saves it in .env next to the database, never in it; scripts set LIVETEST_KEY_<PLUGIN> instead.\n"
-                        "Makes one streamed call first and saves nothing if that fails. The first of its kind is active.")
+                        "Makes one streamed call first and saves nothing if that fails. The first of its kind is active.\n"
+                        "An STT must stream (OpenAI's realtime websocket): a batch one would add seconds to every turn.")
     p.add_argument("--plugin", help="its name")
-    p.add_argument("--kind", choices=["llm"], default="llm", help="what it does (default: llm; stt and tts come later)")
+    p.add_argument("--kind", choices=["llm", "stt", "tts"],
+                   help="what it does: think (llm), or hear (stt) and speak (tts) in voice mode")
+    p.add_argument("--voice-id", metavar="VOICE", help="tts: the voice to speak with, e.g. alloy (OpenAI)")
     p.add_argument("--provider", choices=llm.PRESETS, help="fills in --base-url for a cloud provider")
     p.add_argument("--base-url", metavar="URL", help="any OpenAI-compatible URL: an API (https://api.together.xyz/v1) "
                                                      "or your own server (http://localhost:8000/v1)")
@@ -614,8 +652,9 @@ def main(argv: list[str] | None = None) -> int:
             "livetest run start --name my-agent --scenario 1-20x10 25-35x2",
             "livetest run start --name my-agent --scenario all --profile pro-user --parallel 8 -y",
             "livetest run start --name my-agent --scenario reschedule --run nightly-1",
+            "livetest run start --name my-agent --scenario 1-5 --voice --start-conversation \"Hi, I need to reschedule\"",
             "livetest run start --name my-agent --scenario 3 --token <token>   # an agent saved without a token source",
-            description="Run scenarios against an agent, in text mode. --scenario takes numbers (7), ranges (1-20),\n"
+            description="Run scenarios against an agent, in text mode or --voice. --scenario takes numbers (7), ranges (1-20),\n"
                         "names and all; xN repeats one (1-20x10). Shows the plan and asks first; scripts pass -y.\n"
                         "Prints each test's verdict at the end; run logs follows the conversations. Ctrl+C stops the\n"
                         "run like run stop, keeping what it recorded. A test fails if the agent doesn't start a reply within 10 s;\n"
@@ -628,6 +667,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--parallel", type=int, default=4, metavar="N",
                    help="tests at once (default: 4); the agent's hosting sets the real limit")
     p.add_argument("--llm", metavar="PLUGIN", help="the tester's LLM, if not the active one (env: LIVETEST_LLM)")
+    p.add_argument("--voice", action="store_true", help="talk to the agent by voice: needs a tester STT and TTS")
+    p.add_argument("--start-conversation", metavar="TEXT",
+                   help="the tester opens by saying exactly TEXT (default: the agent opens, and a test fails if it "
+                        "doesn't greet within 10 s)")
+    p.add_argument("--stt", metavar="PLUGIN", help="voice: the tester's STT, if not the active one (env: LIVETEST_STT)")
+    p.add_argument("--tts", metavar="PLUGIN", help="voice: the tester's TTS, if not the active one (env: LIVETEST_TTS)")
+    p.add_argument("--recordings", action=argparse.BooleanOptionalAction, default=True,
+                   help="voice: record each test, stereo .ogg in recordings/ next to the database (default: on)")
     p.add_argument("--token", help="for an agent saved without a token source; runs one test (env: LIVETEST_TOKEN, "
                                    "server URL from LIVEKIT_URL)")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
@@ -651,6 +698,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--test", type=int, metavar="N", help="only this test")
     p.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
 
+    for stream in (sys.stdout, sys.stderr):  # an agent's text can be any character; a cp1252 console shows ?, not a crash
+        stream.reconfigure(errors="replace")
     args = parser.parse_args(argv)
     if args.func is None:
         args.help_of.print_help()

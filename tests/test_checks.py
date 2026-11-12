@@ -12,7 +12,7 @@ EVENTS = [tuple(e) for e in json.loads(Path(__file__).with_name("stub_events.jso
 
 
 def run(*expect, ended="max_turns", events=EVENTS):
-    return {o["check"]: o for o in checks.evaluate(Scenario(name="s", goal="g", expect=list(expect)), ended, events)}
+    return {o["check"]: o for o in checks.evaluate(Scenario(name="s", prompt="p", expect=list(expect)), ended, events)}
 
 
 def replies(events):
@@ -68,35 +68,39 @@ def test_loops():
     assert not run(events=events)["loops"]["passed"]
 
 
+def test_no_greeting_is_silent():
+    """The run said the agent opens, and it never did."""
+    out = run(ended="no_greeting", events=[])
+    assert (out["silent"]["passed"], out["silent"]["actual"]) == (False, ["(the agent's greeting)"])
+
+
 def test_max_minutes_fails():
     assert not run(ended="max_minutes")["finished_in_time"]["passed"]
 
 
 def test_usage():
-    """Counts only. The agent's usage is cumulative, so its last event wins; the tester's turns add up."""
+    """Counts only. The agent's usage is cumulative, so its last event wins; the tester's comes once, at the end."""
     def used(*models):
         return {"session_usage_updated": {"usage": {"model_usage": list(models)}}}
 
     llm = {"provider": "api.groq.com", "model": "m", "input_tokens": 900, "input_cached_tokens": 512, "output_tokens": 40}
     stt = {"provider": "Deepgram", "model": "nova-3", "audio_duration": 2.5}
+    tester = [{"kind": "llm", "provider": "x", "model": "m", "input_tokens": 50, "output_tokens": 4},
+              {"kind": "tts", "provider": "z", "model": "kokoro-7m", "characters_count": 30, "audio_duration": 2.1}]
     events = [
         (1, "agent", "session_usage_updated", used({"stt": {"provider": "Deepgram", "model": "nova-3"}})),
-        (2, "tester", "tester_turn", {"text": "hi", "usage": {"input_tokens": 100, "input_cached_tokens": 0, "output_tokens": 5}}),
+        (2, "tester", "tester_turn", {"text": "hi"}),
         (3, "agent", "session_usage_updated", used({"llm": llm}, {"stt": stt})),
-        (4, "tester", "tester_turn", {"text": "bye", "usage": {"input_tokens": 150, "input_cached_tokens": 100, "output_tokens": 7}}),
-        (5, "tester", "tester_turn", {"text": "a server that reports no usage"}),
+        (4, "tester", "tester_usage", {"usage": tester}),
     ]
-    assert checks.usage(events, "127.0.0.1:8000", "qwen") == {
-        "agent": [{"kind": "llm", **llm}, {"kind": "stt", **stt}],
-        "tester": [{"kind": "llm", "provider": "127.0.0.1:8000", "model": "qwen",
-                    "input_tokens": 250, "input_cached_tokens": 100, "output_tokens": 12}]}
+    assert checks.usage(events) == {"agent": [{"kind": "llm", **llm}, {"kind": "stt", **stt}], "tester": tester}
     # The stub runs no model and the dump's tester reported none: nothing used, nothing made up.
-    assert checks.usage(EVENTS, "p", "m") == {"agent": [], "tester": []}
+    assert checks.usage(EVENTS) == {"agent": [], "tester": []}
 
 
 def test_verdict_stored(tmp_path):
     db = store.connect(tmp_path / "t.db")
-    s = Scenario(name="s", goal="g")
+    s = Scenario(name="s", prompt="p")
     a, b, c = store.start_run(db, "r", "agent", None, [(s, "r")] * 3)
     store.finish_result(db, a, "done", "max_turns", [{"check": "x", "passed": True}])
     store.finish_result(db, b, "done", "max_minutes", [{"check": "x", "passed": True}, {"check": "y", "passed": False}])

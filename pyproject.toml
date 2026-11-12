@@ -5,8 +5,7 @@ description = "End-to-end tests for any LiveKit agent, from just a token"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    # openai: the tester's LLM plugin (any OpenAI-compatible server, always streamed).
-    # Voice plugins (silero, deepgram, elevenlabs) come back with voice mode (module 9).
+    # openai: the tester's LLM, STT and TTS (any OpenAI-compatible server); the VAD is livekit-agents' own.
     "livekit-agents[openai]==1.7.1",
     "python-dotenv==1.2.3",
     # Imported directly by livetest/runtime/models.py; already pulled in by livekit-agents.
@@ -27,8 +26,4 @@ module-root = ""  # package is ./livetest, not ./src/livetest
 [dependency-groups]
 dev = [
     "pytest==9.2.0",
-    # dev/agent.py and dev/otel.py only (the voice prototype and its telemetry).
-    "livekit-agents[groq,silero,deepgram,elevenlabs]==1.7.1",
-    "opentelemetry-sdk==1.39.1",
-    "opentelemetry-exporter-otlp-proto-http==1.39.1",
 ]

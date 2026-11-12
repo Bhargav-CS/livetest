@@ -29,3 +29,4 @@ def setup(verbose: bool = False, errors: Path | None = None) -> None:
         handlers.append(file)
     # force: replaces the handlers of an earlier call (tests call main() many times)
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=handlers, force=True)
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # one INFO line per request the tester's plugins make

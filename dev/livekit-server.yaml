@@ -1,4 +1,4 @@
-# Self-hosted LiveKit server for agent.py - no LiveKit Cloud account.
+# Self-hosted LiveKit server for the live tests (tests/test_runner.py) - no LiveKit Cloud account.
 #
 #   podman kube play --replace dev/livekit-server.yaml
 #   podman kube down dev/livekit-server.yaml

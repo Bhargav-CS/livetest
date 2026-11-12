@@ -1,5 +1,5 @@
 """What users create: agents (what to test, how to connect), profiles (who the user is, as the agent sees them) and
-scenarios (what the tester tries). Everything saved goes through these models first, from the CLI
+scenarios (the tester's prompt and what to check). Everything saved goes through these models first, from the CLI
 or the UI, and the UI's forms can be built from their JSON Schema (`model_json_schema()`).
 """
 
@@ -36,7 +36,7 @@ class Agent(Strict):
     name: str = Field(min_length=1, description="The agent's LiveKit agent_name; livetest dispatches it by this name")
     sandbox: str | None = Field(None, description="LiveKit sandbox token server ID")
     endpoint: str | None = Field(None, description="Your token endpoint URL")
-    url: str | None = Field(None, description="LiveKit server URL; key and secret come from env vars")
+    url: str | None = Field(None, description="LiveKit server URL; livetest makes tokens with the agent's key and secret")
 
     @model_validator(mode="after")
     def one_connection(self):
@@ -100,12 +100,20 @@ Check = Annotated[ToolCheck | NoToolErrors | Latency, Field(discriminator="type"
 
 
 class Plugin(Strict):
-    """What the tester thinks with: any OpenAI-compatible server. One per kind is active. Its key is never stored here."""
+    """What the tester thinks, hears (voice mode) or speaks with: any OpenAI-compatible server. One per kind is active.
+    Its key is never stored here."""
 
     name: Name = Field(description="What `plugin use --plugin` calls it")
-    kind: Literal["llm"] = "llm"  # stt and tts come with voice mode
+    kind: Literal["llm", "stt", "tts"] = "llm"
     base_url: str = Field(min_length=1, description="The server's OpenAI-compatible base URL")
     model: str = Field(min_length=1)
+    voice_id: str | None = Field(None, description="TTS only: the voice to speak with")
+
+    @model_validator(mode="after")
+    def _voice_is_tts(self):
+        if self.voice_id and self.kind != "tts":
+            raise ValueError("only a tts plugin has a voice id")
+        return self
 
 
 def key_var(name: str, what: str = "KEY") -> str:
@@ -114,12 +122,11 @@ def key_var(name: str, what: str = "KEY") -> str:
 
 
 class Scenario(Strict):
-    """One test: what the tester wants and how they behave. Global: the run picks the agent and profile."""
+    """One test: the tester's prompt and what to check. Global: the run picks the agent and profile."""
 
     name: Name
-    goal: str = Field(min_length=1, description="What the tester is trying to get done")
+    prompt: str = Field(min_length=1, description="The tester LLM's whole system prompt, sent as written")
     tags: list[str] = Field([], description="Groups scenarios, e.g. for `scenario list --tag`")
-    persona: dict[str, Any] = Field({}, description="How the tester behaves, e.g. mood, language")
     max_turns: int = Field(10, ge=1)
     max_minutes: float = Field(5, gt=0)
     expect: list[Check] = []
