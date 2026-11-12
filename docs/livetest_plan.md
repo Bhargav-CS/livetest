@@ -271,7 +271,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
    - [x] Every run stored in `~/.livetest/livetest.db` (SQLite), recordings next to it (see "Results, logs and the UI"): `runs` + `results` + `events`, recordings as paths on `results`
    - [x] Log lines as `events` rows, tagged with their test through a `contextvar` (parallel-safe); console logging in `platform/logging.py`, `-v` global; tracebacks in `~/.livetest/errors.log` for bug reports (module 7)
    - [x] `livetest run start|list|logs|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop (DB statuses), `--json`, exit codes, 10 s reply rule (`cli.py`, `runtime/runner.py`, `runtime/store.py`)
-   - [ ] `livetest report create`: one self-contained HTML per run or per test, recordings embedded
+   - [x] `livetest report create`: one self-contained HTML per run or per test, recordings embedded; traces in LiveKit's own span shape, rebuilt from session-host events, with the recording playing along them (`ui/report.py`, `ui/static/run.html`, module 10)
    - [ ] `livetest report gate`: user-defined CI rules (later)
    - [ ] Optional OTLP export (Grafana, Langfuse, etc.); not required for a first run
 4. **LLM as judge**
@@ -354,7 +354,7 @@ livetest/
 ├── platform/      what livetest needs to run, kept generic: db.py, keys.py, llm.py; stt.py, tts.py, logging.py (empty: where they go)
 ├── runtime/       what livetest does: models.py, store.py, tokens.py, session.py; runner, checks
 ├── integrations/  optional extras, switched on by the entry point: otel.py (empty: where OTLP export to Grafana / Langfuse goes)
-├── ui/            entry point: server.py (aiohttp + JSON API), static/ (the one page), report.py (that page with data baked in)
+├── ui/            entry point: report.py (static/run.html with a run's rows baked in); module 11 adds server.py (aiohttp + JSON API) and static/app.html (the shell)
 └── cli.py         entry point
 tests/             pytest (dev-only dependency); test_layers.py enforces the rule below
 dev/               contributor-only: livekit-server.yaml (self-hosted LiveKit for the live tests)
@@ -432,7 +432,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | 7 | [x] | `run start\|list\|logs\|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop, `--json`, exit codes | `cli.py`, `runtime/runner.py` | pytest + self-hosted | yes |
 | 8 | [x] | Usage: the agent's (its session usage) and the tester's (its LLM's tokens), saved on each result; no cost (user, 2026-11-12) | `runtime/checks.py`, `runtime/runner.py`, `runtime/store.py`, `platform/llm.py`, `cli.py` | pytest on saved usage | no |
 | 9 | [x] | Voice mode and recording (after the test ends) | `runtime/runner.py` | self-hosted, voice stub | yes |
-| 10 | [ ] | `report create`: one offline HTML file | `ui/report.py`, `ui/static/` | open the file | no |
+| 10 | [x] | `report create`: one offline HTML file | `ui/report.py`, `ui/static/` | open the file | no |
 | 11 | [ ] | `livetest ui`: aiohttp + JSON API + the A/C page | `ui/server.py`, `ui/static/` | browser | no |
 | 12 | [ ] | `livetest doctor` | `cli.py` | pytest | partly |
 | 13 | [ ] | Install scripts (sh / iex via `uv tool install`); upgrading = re-running them, which stops the background UI first | `install.sh`, `install.ps1` | fresh install on Windows | no |

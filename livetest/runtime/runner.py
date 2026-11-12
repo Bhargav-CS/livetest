@@ -139,7 +139,8 @@ async def _stopping(db, result: int) -> None:
 
 
 def _d(msg) -> dict:
-    return MessageToDict(msg, preserving_proto_field_name=True)
+    # Defaults kept: an enum's 0 is a real value (US_SPEAKING), not "unset".
+    return MessageToDict(msg, preserving_proto_field_name=True, always_print_fields_with_no_presence=True)
 
 
 def _said(items) -> str:
