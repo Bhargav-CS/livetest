@@ -160,6 +160,16 @@ def results(conn: sqlite3.Connection, run: str) -> list[dict]:
         "WHERE r.run = ? GROUP BY r.id ORDER BY r.test", (run,)))
 
 
+def last_scores(conn: sqlite3.Connection) -> dict[str, dict]:
+    """By scenario name: passed / graded in the latest run that graded it (the UI's last-score chip)."""
+    found = conn.execute(
+        "WITH g AS (SELECT json_extract(t.scenario, '$.name') AS name, t.run, t.passed, r.rowid AS n FROM results t "
+        "JOIN runs r ON r.id = t.run WHERE t.passed IS NOT NULL) "
+        "SELECT name, run, SUM(passed), COUNT(*) FROM g WHERE n = (SELECT MAX(h.n) FROM g h WHERE h.name = g.name) "
+        "GROUP BY name")
+    return {name: {"run": run, "passed": passed, "graded": graded} for name, run, passed, graded in found}
+
+
 def begin(conn: sqlite3.Connection, result: int) -> bool:
     """queued → running. False if it was stopped while queued."""
     with conn:
@@ -185,7 +195,9 @@ def event(conn: sqlite3.Connection, result: int, source: str, type: str, data, t
 
 def finish_result(conn: sqlite3.Connection, result: int, status: str, ended: str | None,
                   checks: list[dict] | None = None, usage: dict | None = None) -> None:
-    passed, checks = (None, None) if checks is None else (all(c["passed"] for c in checks), json.dumps(checks))
+    # The agent not greeting or not replying in checks.REPLY_S fails the test, checks or not.
+    passed, checks = (None, None) if checks is None else (
+        ended not in ("no_greeting", "no_reply") and all(c["passed"] for c in checks), json.dumps(checks))
     with conn:
         conn.execute("UPDATE results SET status = ?, ended = ?, passed = ?, checks = ?, usage = ?, "
                      "finished_at = CURRENT_TIMESTAMP WHERE id = ?",

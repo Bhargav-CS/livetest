@@ -6,24 +6,27 @@ import getpass
 import json
 import logging
 import os
+import signal
 import sqlite3
+import subprocess
 import sys
 import time
-import uuid
+import urllib.request
+import webbrowser
 from collections import Counter
 from contextlib import closing
 from importlib.metadata import version
 from pathlib import Path
 
-import jwt
+from aiohttp import web
 from pydantic import ValidationError
 
-from livetest.platform import keys, llm, stt, tts
+from livetest.platform import llm
 from livetest.platform import logging as logs
 from livetest.platform.db import DEFAULT_PATH
-from livetest.runtime import runner, session, store, tokens
-from livetest.runtime.models import Agent, Participant, Plugin, Profile, Scenario, key_var
-from livetest.ui import report
+from livetest.runtime import runner, setup, store
+from livetest.runtime.models import Agent, Participant, Plugin, Profile, Scenario
+from livetest.ui import report, server
 
 ISSUES = "https://github.com/Bhargav-CS/livetest/issues"
 LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -76,10 +79,10 @@ def metadata(text: str) -> dict | str:
 
 
 def pairs(items: list[str] | None, parse=value) -> dict:
-    """['k=v', ...] → {k: parse(v)}."""
+    """['k=v', ...] → {k: parse(v)}; spaces around = don't count (the UI reads the same lines)."""
     out = {}
     for item in items or []:
-        k, sep, v = item.partition("=")
+        k, sep, v = (s.strip() for s in item.partition("="))
         if not (k and sep):
             raise Fail(f"expected key=value, got '{item}'")
         out[k] = parse(v)
@@ -91,8 +94,7 @@ def given(**fields) -> dict:
     return {k: v for k, v in fields.items() if v is not None}
 
 
-def label(kind: type) -> str:
-    return kind.__name__.lower()  # agent, profile, scenario: also the CLI group's name
+label = setup.label
 
 
 def flag(kind: type) -> str:
@@ -107,52 +109,38 @@ def errors_file(args: argparse.Namespace) -> Path:
     return args.db.parent / "errors.log"
 
 
-def find(db: sqlite3.Connection, kind: type, name: str):
-    """A saved agent, profile or plugin by name."""
-    if found := {m.name: m for _, m in store.rows(db, kind)}.get(name):
-        return found
-    raise Fail(f"no {label(kind)} named '{name}'; see: livetest {label(kind)} list")
-
-
-def secret_vars(kind: type, name: str) -> list[str]:
-    """The .env vars holding a plugin's key or an agent's API key and secret."""
-    return [key_var(name, w) for w in ("AGENT_KEY", "AGENT_SECRET")] if kind is Agent else [key_var(name)]
-
-
-def free(db: sqlite3.Connection, kind: type, name: str) -> None:
-    """Refuse a taken name, or one that would share another's keys in .env (a-b and a_b)."""
-    if taken := [m.name for _, m in store.rows(db, kind) if key_var(m.name) == key_var(name)]:
-        raise Fail(f"{label(kind)} '{taken[0]}' already exists" + ("" if taken[0] == name else f"; '{name}' would share its key"))
-
-
-def save(db: sqlite3.Connection, model) -> int:
+def user(call, *a):
+    """`call(*a)`, its ValueError (bad input, from runtime) as a Fail."""
     try:
-        n = store.add(db, model)
-    except sqlite3.IntegrityError:
-        raise Fail(f"{label(type(model))} '{model.name}' already exists") from None
+        return call(*a)
+    except ValueError as e:
+        raise Fail(e) from None
+
+
+def added(model, n: int | None = None) -> int:
     print(f"added {label(type(model))} '{model.name}'" + (f" as number {n}" if isinstance(model, Scenario) else ""))
     return 0
 
 
+def save(db: sqlite3.Connection, model) -> int:
+    return added(model, user(setup.save, db, model))
+
+
 def cmd_init(db: sqlite3.Connection, args: argparse.Namespace) -> int:
-    # connect() in main() already created the DB; init is the friendly first step that says so.
-    print(f"livetest is set up: {args.db}")
-    # The agent first: it's what you came to test.
-    again = ["--db", str(args.db), *(["-v"] if args.verbose else [])]
-    if not store.rows(db, Agent) and offer("agent", "the one you test", "agent add -h"):
-        if code := main([*again, "agent", "add"]):
-            return code
-    if "llm" not in store.active(db) and offer("tester LLM", "the model that plays the user", "plugin add -h"):
-        return main([*again, "plugin", "add", "--kind", "llm"])
+    # connect() in main() already created the DB; init (the install script runs it) says so and what's next.
+    print(f"livetest is set up: {args.db}\n")
+    steps = [("agent add -h", "the agent you test", store.rows(db, Agent)),
+             ("plugin add --kind llm -h", "the tester's LLM", "llm" in store.active(db)),
+             ("scenario add -h", "what the tester does and what must happen", store.rows(db, Scenario)),
+             ("run start -h", "run it", store.runs(db))]  # the UI's Welcome steps, in its order
+    if all(done for *_, done in steps):
+        print("Everything is set up. See your runs: livetest ui show, or livetest run list")
+        return 0
+    print("Next, use the web UI:\n  livetest ui show\nor the terminal:")
+    for command, what, done in steps:
+        if not done:
+            print(f"  {'livetest ' + command:<34} {what}")
     return 0
-
-
-def offer(what: str, why: str, see: str) -> bool:
-    """Ask a person whether to add a missing thing now; scripts are told where to look instead."""
-    if sys.stdin.isatty():
-        return ask(f"No {what} yet ({why}). Add one now? [Y/n] ").lower() in ("", "y", "yes")
-    print(f"no {what} yet; see: livetest {see}")
-    return False
 
 
 def cmd_plugin_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
@@ -165,27 +153,23 @@ def cmd_plugin_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
               "Provider or base URL: ", "--base-url")
     plugin = Plugin(name=name, kind=kind, base_url=llm.PRESETS.get(url, url),
                     model=need(args.model, "Model: ", "--model"), voice_id=args.voice_id)
-    free(db, Plugin, name)
-    file = env_file(args)
+    user(setup.free, db, Plugin, name)  # before asking for its key
     # ponytail: on Windows getpass reads the console even when stdin is redirected; fine until a CI box hangs on it
     key = getpass.getpass("API key (Enter for none): ").strip() if sys.stdin.isatty() else ""
     try:
-        check = {"llm": llm.check, "stt": stt.check, "tts": tts.check}[plugin.kind]
-        secs = asyncio.run(check(plugin.base_url, plugin.model, key or keys.get(file, key_var(name)),
-                                 *([plugin.voice_id] if plugin.voice_id else [])))
+        secs, first = user(asyncio.run, setup.add_plugin(db, env_file(args), plugin, key))
     except ConnectionError as e:
-        print(f"error: {plugin.model} at {plugin.base_url} didn't answer ({e}); check the URL, model and key",
-              file=sys.stderr)
+        print(f"error: {e}", file=sys.stderr)
         return 3
-    print({"llm": f"checked: first token in {secs:.1f} s", "tts": f"checked: first audio in {secs:.1f} s"}
-          .get(plugin.kind, "checked: it streams"))
-    save(db, plugin)
-    if key:
-        keys.save(file, key_var(name), key)
-    if plugin.kind not in store.active(db):
-        store.use(db, name)
+    print(checked(plugin.kind, secs))
+    added(plugin)
+    if first:
         print(f"it's the active {plugin.kind}")
     return 0
+
+
+def checked(kind: str, secs: float) -> str:
+    return {"llm": f"checked: first token in {secs:.1f} s", "tts": f"checked: first audio in {secs:.1f} s"}.get(kind, "checked: it streams")
 
 
 def cmd_plugin_use(db: sqlite3.Connection, args: argparse.Namespace) -> int:
@@ -197,9 +181,7 @@ def cmd_plugin_use(db: sqlite3.Connection, args: argparse.Namespace) -> int:
 
 
 def cmd_plugin_list(db: sqlite3.Connection, args: argparse.Namespace) -> int:
-    on = {p.name for p in store.active(db).values()}
-    found = [m.model_dump(mode="json") | {"active": m.name in on, "key": bool(keys.get(env_file(args), key_var(m.name)))}
-             for _, m in store.rows(db, Plugin)]  # whether a key is set, never the key
+    found = setup.listed(db, env_file(args), Plugin)
     return listing(args, found, [f"{'*' if p['active'] else ' '} {p['name']:<20} {p['kind']:<4} {p['base_url']:<40} "
                                  f"{p['model']}  key: {'set' if p['key'] else 'none'}" for p in found], "plugin add -h")
 
@@ -212,29 +194,19 @@ def cmd_agent_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
         source = {"url" if where.startswith(("ws://", "wss://")) else
                   "endpoint" if where.startswith(("http://", "https://")) else "sandbox": where}
     agent = Agent(name=name, **source)
-    free(db, Agent, name)
-    file, names = env_file(args), secret_vars(Agent, name)
+    user(setup.free, db, Agent, name)  # before asking for its keys
+    names = setup.secret_vars(Agent, name)
     # ponytail: on Windows getpass reads the console even when stdin is redirected; same as plugin add
-    typed = {v: getpass.getpass(f"{q} (Enter to use ${v}): ").strip()
-             for v, q in zip(names, ("LiveKit API key", "API secret"))} if agent.url and sys.stdin.isatty() else {}
-    if source:  # like plugin add: prove it works, save nothing if it doesn't
-        key, secret = (typed.get(v) or keys.get(file, v) for v in names)
-        try:
-            url, token = tokens.connect(agent, f"livetest-{uuid.uuid4().hex[:8]}", key=key, secret=secret)
-            secs = asyncio.run(session.joins(url, token, key, secret))
-        except ConnectionError as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 3
-        except ValueError as e:
-            raise Fail(e) from None
-        print(f"checked: {name} joined in {secs:.1f} s")
-    else:
-        print("no token source: pass its token with --token when you run it")
-    save(db, agent)
-    for v, s in typed.items():
-        if s:
-            keys.save(file, v, s)
-    return 0
+    typed = [getpass.getpass(f"{q} (Enter to use ${v}): ").strip()
+             for v, q in zip(names, ("LiveKit API key", "API secret"))] if agent.url and sys.stdin.isatty() else []
+    try:  # like plugin add: prove it works, save nothing if it doesn't
+        secs = user(asyncio.run, setup.add_agent(db, env_file(args), agent, *typed))
+    except ConnectionError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 3
+    print(f"checked: {name} joined in {secs:.1f} s" if secs is not None
+          else "no token source: pass its token with --token when you run it")
+    return added(agent)
 
 
 def cmd_profile_add(db: sqlite3.Connection, args: argparse.Namespace) -> int:
@@ -291,11 +263,8 @@ def cmd_remove(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     if not confirm(f"Remove {what} '{name}'?", args):
         print("cancelled")
         return 0
-    if not store.remove(db, args.kind, name):
+    if not setup.remove(db, env_file(args), args.kind, name):  # an agent's or plugin's keys go with it
         raise Fail(f"no {what} named '{name}'; see: livetest {what} list")
-    if args.kind in (Agent, Plugin):
-        for v in secret_vars(args.kind, name):  # its keys go with it
-            keys.remove(env_file(args), v)
     print(f"removed {what} '{name}'")
     return 0
 
@@ -314,14 +283,15 @@ def verdict(r: dict) -> str:
 
 
 def used(results: list[dict]) -> str:
-    """LLM tokens summed over `results`, per side: '  tokens agent 900 in (512 cached) / 40 out, tester 250 in / 12 out'.
-    Counts only (no cost in v0.1); STT / TTS and per-model counts are in --json."""
+    """LLM tokens summed over `results`, per side: '  tokens as reported by LiveKit: agent 900 in (512 cached) / 40 out,
+    tester 250 in / 12 out'. LiveKit counts 0 for an LLM call cut off by an interruption. Counts only (no cost in v0.1);
+    STT / TTS and per-model counts are in --json."""
     parts = []
     for side in ("agent", "tester"):
         if rows := [x for r in results for x in json.loads(r["usage"] or "{}").get(side, []) if x["kind"] == "llm"]:
             i, c, o = (sum(x.get(k, 0) for x in rows) for k in ("input_tokens", "input_cached_tokens", "output_tokens"))
             parts.append(f"{side} {i} in{f' ({c} cached)' if c else ''} / {o} out")
-    return "  tokens " + ", ".join(parts) if parts else ""
+    return "  tokens as reported by LiveKit: " + ", ".join(parts) if parts else ""
 
 
 def run_line(r: dict) -> str:
@@ -352,73 +322,26 @@ def pick_run(db: sqlite3.Connection, args: argparse.Namespace) -> dict:
 
 
 def cmd_run_start(db: sqlite3.Connection, args: argparse.Namespace) -> int:
-    agent = find(db, Agent, need(args.name, "Agent to test: ", "--name"))
+    name = need(args.name, "Agent to test: ", "--name")
     items = args.scenario or need(None, "Scenarios to run (e.g. 1-5 7x3, or all): ", "--scenario").split()
     try:
-        tests = runner.select(items, store.rows(db, Scenario))
-        run = runner.run_id(args.run) if args.run else store.next_run_id(db)
-    except ValueError as e:
-        raise Fail(e) from None
-    if store.runs(db, run):
-        raise Fail(f"run id '{run}' is taken; pick another with --run, or leave it out")
-    if args.parallel < 1:
-        raise Fail("--parallel must be 1 or more")
-    profile = find(db, Profile, args.profile) if args.profile else None
-    plugin = tester_plugin(db, "llm", args.llm)
-    voice = (tester_plugin(db, "stt", args.stt), tester_plugin(db, "tts", args.tts)) if args.voice else ()
-    token = args.token or os.environ.get("LIVETEST_TOKEN")
-    if token and len(tests) > 1:
-        a = agent.name
-        raise Fail(f"a raw token joins one room, so it runs one test; this selection has {len(tests)}.\n"
-                   f"To run more, save how livetest gets tokens for '{a}': remove it, then add it again with one of\n"
-                   f"  livetest agent rm --name {a} -y\n  livetest agent add --name {a} --sandbox <sandbox-id>\n"
-                   f"  livetest agent add --name {a} --endpoint <your-token-endpoint-url>\n"
-                   f"  livetest agent add --name {a} --url <livekit-server-url>   # asks for its API key and secret")
-    file = env_file(args)
-    key, secret = (keys.get(file, v) for v in secret_vars(Agent, agent.name)) if agent.url else (None, None)
-
-    def connect(room: str) -> tuple[str, str]:
-        return tokens.connect(agent, room, profile, token=token, url=os.environ.get("LIVEKIT_URL"), key=key, secret=secret)
-
-    try:
-        connect(f"livetest-{run}-check")  # fail fast (bad token, profile mismatch, missing key), before anything is saved
-    except ValueError as e:
-        raise Fail(e) from None
+        plan = user(lambda: runner.prepare(
+            db, args.db.parent, name, items, run=args.run, profile=args.profile, parallel=args.parallel, voice=args.voice,
+            plugins={"llm": args.llm, "stt": args.stt, "tts": args.tts}, recordings=args.recordings,
+            opening=args.start_conversation, token=args.token))
     except ConnectionError as e:
         print(f"error: {e}", file=sys.stderr)
         return 3
-    rooms = ([jwt.decode(token, options={"verify_signature": False}).get("video", {}).get("room", "")] if token  # its room
-             else [f"livetest-{run}-{n}-{uuid.uuid4().hex[:6]}" for n in range(1, len(tests) + 1)])
-    folder = args.db.parent / "recordings" / f"run-{run}" if voice and args.recordings else None
-    print(f"run id: {run}\n{agent.name}: {len({n for n, _ in tests})} scenarios, {len(tests)} tests, "
-          f"{'voice' if voice else 'text'} mode, {args.parallel} in parallel, profile {profile.name if profile else 'none'}, "
-          f"tester {', '.join(f'{p.kind} {p.name}' for p in (plugin, *voice))}"
-          + (f"\nrecording: {f'on ({folder}, one file per test)' if folder else 'off'}" if voice else "")
-          + "\nopens: " + (f'tester ("{args.start_conversation}")' if args.start_conversation else "agent"))
+    print(plan.summary())
     if not confirm("continue?", args):
         print("cancelled")
         return 0
-
-    ids = store.start_run(db, run, agent.name, profile, [(s, room) for (_, s), room in zip(tests, rooms)],
-                          "voice" if voice else "text")
+    run, ids = plan.run, runner.queue(db, plan)
     print(f"running; verdicts print when it ends, Ctrl+C stops it. Follow it: livetest run logs --run {run}", flush=True)
-
-    async def go() -> None:
-        key_of = lambda p: keys.get(file, key_var(p.name))
-        tester = llm.llm(plugin.base_url, plugin.model, key_of(plugin))
-        ears_mouth = (stt.stt(voice[0].base_url, voice[0].model, key_of(voice[0])),
-                      tts.tts(voice[1].base_url, voice[1].model, key_of(voice[1]), voice[1].voice_id)) if voice else None
-        try:
-            await runner.run(db, [(i, s, room) for i, (_, s), room in zip(ids, tests, rooms)],
-                             connect, tester, args.parallel, key, secret, ears_mouth, folder,
-                             opening=args.start_conversation)
-        finally:
-            for model in (tester, *(ears_mouth or ())):
-                await model.aclose()
 
     interrupted = False
     try:
-        asyncio.run(go())
+        asyncio.run(runner.launch(db, plan, ids, env_file(args)))
     except KeyboardInterrupt:  # Ctrl+C = run stop: running tests ended as stopped, queued ones never start
         interrupted = True
         store.stop(db, run)
@@ -437,17 +360,6 @@ def cmd_run_start(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     if statuses & {"never_joined", "no_session_host"}:
         return 3
     return 1 if "error" in statuses or any(r["passed"] == 0 for r in found) else 0
-
-
-def tester_plugin(db: sqlite3.Connection, kind: str, name: str | None) -> Plugin:
-    """The tester's LLM / STT / TTS: flag > LIVETEST_<KIND> > the active one."""
-    if not (name := name or os.environ.get(f"LIVETEST_{kind.upper()}")):
-        if found := store.active(db).get(kind):
-            return found
-        raise Fail(f"no tester {kind.upper()} yet; see: livetest plugin add --kind {kind} -h")
-    if (found := find(db, Plugin, name)).kind != kind:
-        raise Fail(f"'{name}' is a {found.kind} plugin, not {kind}; see: livetest plugin list")
-    return found
 
 
 def cmd_run_list(db: sqlite3.Connection, args: argparse.Namespace) -> int:
@@ -487,13 +399,75 @@ def cmd_run_stop(db: sqlite3.Connection, args: argparse.Namespace) -> int:
 def cmd_report_create(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     run = pick_run(db, args)
     try:
-        page = report.create(db, run, args.test)
+        page = report.create(db, run, args.test, args.recordings)
     except ValueError as e:
         raise Fail(e) from None
-    out = args.output or Path(f"run-{run['id']}{f'_test-{args.test}' if args.test else ''}_report.html")
+    out = args.output or Path(report.filename(run["id"], args.test))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
     print(f"wrote {out} ({out.stat().st_size // 1024:,} KB)")
+    return 0
+
+
+def ui_file(args: argparse.Namespace) -> Path:
+    return args.db.parent / "ui.json"  # the background UI's {pid, port}
+
+
+def ui_running(args: argparse.Namespace) -> dict | None:
+    """The background UI's {pid, port} if it answers, else None."""
+    try:
+        found = json.loads(ui_file(args).read_text())
+        urllib.request.urlopen(f"http://127.0.0.1:{found['port']}/api/runs", timeout=1).close()
+        return found
+    except (OSError, ValueError, KeyError):  # no file, a bad one, or nothing answering
+        return None
+
+
+def cmd_ui_serve(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    print(f"LiveTest UI: http://127.0.0.1:{args.port}/  (this machine only; Ctrl+C stops it)", flush=True)
+    try:
+        web.run_app(server.app(args.db), host="127.0.0.1", port=args.port, print=None)
+    except OSError as e:
+        raise Fail(f"can't serve on port {args.port} ({e.strerror}); pick another with --port") from None
+    return 0
+
+
+def cmd_ui_show(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    if found := ui_running(args):
+        port = found["port"]
+    else:
+        port = args.port
+        detach = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+                  else {"start_new_session": True})
+        p = subprocess.Popen([sys.executable, "-m", "livetest.cli", "--db", str(args.db), "ui", "serve", "--port", str(port)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detach)
+        ui_file(args).write_text(json.dumps({"pid": p.pid, "port": port}))
+        deadline = time.monotonic() + 10
+        while not ui_running(args):
+            if p.poll() is not None or time.monotonic() > deadline:  # it exited (port taken?) or hangs
+                p.kill()
+                ui_file(args).unlink()
+                raise Fail(f"the UI didn't start; run it in the foreground to see why: livetest ui serve --port {port}")
+            time.sleep(0.2)
+    url = f"http://127.0.0.1:{port}/"
+    webbrowser.open(url)
+    print(f"LiveTest UI: {url}  (livetest ui stop stops it)")
+    return 0
+
+
+def cmd_ui_stop(db: sqlite3.Connection, args: argparse.Namespace) -> int:
+    if not (found := ui_running(args)):  # a stale pid could be anyone's process now: only kill one that answers
+        ui_file(args).unlink(missing_ok=True)
+        print("the UI is not running")
+        return 0
+    # Runs started from the UI live in its process: stopped first, they end cleanly and keep what they recorded.
+    stopping = urllib.request.Request(f"http://127.0.0.1:{found['port']}/api/quit", b"{}", {"Content-Type": "application/json"})
+    with urllib.request.urlopen(stopping, timeout=40) as answer:
+        if n := json.loads(answer.read())["stopped"]:
+            print(f"stopped {n} run{'s' * (n > 1)} the UI started")
+    os.kill(found["pid"], signal.SIGTERM)  # Windows: TerminateProcess
+    ui_file(args).unlink()
+    print("stopped the UI")
     return 0
 
 
@@ -544,6 +518,7 @@ manage:
 test:
   run         start, list, follow or stop runs: scenarios against an agent
   report      write a run's results as one HTML file that opens offline
+  ui          open the web UI: setup, new runs, and runs live with their recordings
 """
 
 
@@ -726,6 +701,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run", help="a run's id, or latest")
     p.add_argument("--test", type=int, metavar="N", help="only this test")
     p.add_argument("--output", type=Path, metavar="FILE", help="where to write it (default: ./run-<run>_report.html)")
+    p.add_argument("--recordings", action=argparse.BooleanOptionalAction, default=True,
+                   help="embed the recordings (default: on); --no-recordings keeps the file small")
+
+    actions = cmd(sub, "ui", None, "Open the web UI: add agents, scenarios, profiles and plugins, start runs, and watch them live with their\n"
+                  "recordings. This machine only (127.0.0.1). Runs started there live in its process: ui stop stops them first.",
+                  "livetest ui show", "livetest ui stop", "livetest ui serve --port 9000"
+                  ).add_subparsers(dest="action", title="actions", metavar="<action>")
+    p = cmd(actions, "show", cmd_ui_show, "open the UI in the browser, starting it in the background if needed",
+            "livetest ui show", "livetest ui show --port 9000")
+    p.add_argument("--port", type=int, default=8787, help="if it has to start it (default: 8787)")
+    p = cmd(actions, "serve", cmd_ui_serve, "run the UI in this terminal until Ctrl+C",
+            "livetest ui serve", "livetest ui serve --port 9000")
+    p.add_argument("--port", type=int, default=8787, help="default: 8787")
+    cmd(actions, "stop", cmd_ui_stop, "stop the background UI", "livetest ui stop")
 
     for stream in (sys.stdout, sys.stderr):  # an agent's text can be any character; a cp1252 console shows ?, not a crash
         stream.reconfigure(errors="replace")

@@ -42,12 +42,22 @@ def test_whole_run(run, tmp_path):
     got = data(tmp_path / "run-r_report.html")
     assert got["run"]["id"] == "r" and [t["test"] for t in got["results"]] == [1, 2]
     assert [e[2] for e in got["results"][0]["events"]] == [e[2] for e in EVENTS]
+    # Reply gaps come paired by checks.replies, so the page grades them as the latency check does.
+    assert [g["turn"] for g in got["results"][0]["replies"]] == [1, 2, 3] and got["reply_p95_ms"] > 2000
     assert got["results"][0]["audio"] == "data:audio/ogg;base64," + base64.b64encode(b"OggS fake").decode()
     assert got["results"][1]["audio"] is None  # never recorded
     (tmp_path / "test-1.ogg").unlink()  # the page says "recording missing": the path is set, the audio isn't
     assert run("report", "create", "--run", "latest") == 0
     again = data(tmp_path / "run-r_report.html")["results"][0]
     assert again["audio"] is None and again["recording"]
+
+
+def test_fonts_inside_recordings_optional(run, tmp_path):
+    assert run("report", "create", "--run", "r", "--no-recordings") == 0
+    page = (tmp_path / "run-r_report.html").read_text(encoding="utf-8")
+    assert "url(/fonts/" not in page and page.count("data:font/woff2;base64,") == 2  # it looks like the UI, offline
+    got = data(tmp_path / "run-r_report.html")
+    assert got["recordings"] is False and got["results"][0]["audio"] is None  # the page says "left out", not "missing"
 
 
 def test_one_test(run, tmp_path):

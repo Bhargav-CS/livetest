@@ -182,11 +182,13 @@ def test_max_turns(db, stub, tester, caplog):
     # The tester's LLM gets exactly the scenario's prompt and the agent's words: nothing livetest wrote.
     assert tester.asked[0]["messages"] == [{"role": "system", "content": "p"},
                                            {"role": "user", "content": "Hi, how can I help?"}]
-    # The stub's LLM is fake, so its usage has no llm (with voice tests on, only its STT); the tester's adds up.
+    # The stub's LLM is fake, so its usage has no llm (with voice tests on, only its STT); the tester's adds up,
+    # counted as LiveKit counts the agent's. The agent's usage is cumulative: stored once, as the test ends.
     usage = json.loads(res["usage"])
     assert "llm" not in {u["kind"] for u in usage["agent"]}
     assert usage["tester"] == [{"kind": "llm", "provider": tester.url.split("/")[2], "model": "fake",
-                                "input_tokens": 30, "input_cached_tokens": 0, "output_tokens": 6}]
+                                "input_tokens": 30, "output_tokens": 6}]
+    assert len(of("session_usage_updated")) == 1
     assert {"framework", "session_state", "chat_history", "seen", "conversation_item_added"} <= {t for _, _, t, _ in evs}
     assert any(src == "log" for _, src, _, _ in evs)
     # The agent's replies reach the tester as the other side of its conversation.
@@ -220,7 +222,7 @@ def test_parallel_run_from_the_cli(tmp_path, stub, tester, monkeypatch, capsys):
     cli = lambda *a: main(["--db", str(tmp_path / "t.db"), *a])
     assert cli("agent", "add", "--name", "livetest-stub", "--url", URL) == 0
     assert cli("plugin", "add", "--kind", "llm", "--plugin", "fake", "--base-url", tester.url, "--model", "fake") == 0
-    for s in ("a", "b", "c"):  # one turn each: the stub's canned replies would count as a loop over two
+    for s in ("a", "b", "c"):  # one turn each, to keep it short
         assert cli("scenario", "add", "--scenario", s, "--prompt", "p", "--max-turns", "1") == 0
     assert cli("run", "start", "--name", "livetest-stub", "--scenario", "all", "--parallel", "2", "-y") == 0
     capsys.readouterr()
@@ -232,11 +234,10 @@ def test_parallel_run_from_the_cli(tmp_path, stub, tester, monkeypatch, capsys):
 @selfhost
 @pytest.mark.parametrize("line", ["please fail", "be slow"])
 def test_agent_doesnt_reply(db, stub, tester, line):
-    """The agent errors out of a turn, or takes over 10 s to start: the test ends there and fails; not a livetest error."""
+    """The agent errors out of a turn, or takes over 10 s to start: the test ends there as no_reply (not a livetest
+    error) and fails, though the scenario sets no checks."""
     res, _ = run(db, tester("hello", line, "anyone there?"), Scenario(name="s", prompt="p", max_turns=3))
-    assert (res["status"], res["ended"], res["passed"]) == ("done", "no_reply", 0)
-    silent = next(c for c in json.loads(res["checks"]) if c["check"] == "silent")
-    assert silent["actual"] == [line]
+    assert (res["status"], res["ended"], res["passed"], res["checks"]) == ("done", "no_reply", 0, "[]")
 
 
 @selfhost
@@ -305,10 +306,18 @@ def test_voice(db, stub, tester, tmp_path):
     assert (res["status"], res["ended"]) == ("done", "max_turns"), res
     of = lambda kind: [d for _, _, t, d in evs if t == kind]
     assert [d["text"] for d in of("tester_turn")] == ["hello", "please use the tool", "thanks"]  # no 4th turn
+    # Whether the agent cut the tester off: its line may then hold more than was spoken (no transcript synchronizer).
+    assert all(d["interrupted"] is False for d in of("tester_turn"))  # the stub never talks over the tester
     # The tester's STT heard the agent's TTS (Moonshine sometimes hears "canned reply" as "Can Reply").
     assert any("reply" in d["text"].lower() for d in of("tester_heard"))
     assert of("user_input_transcribed")  # and the agent's STT heard the tester
     assert len(of("tool_execution_updated")) == 2  # "use the tool", by voice
+    # The tester's own states, for its tester_turn spans: it thinks (its LLM) and speaks (its TTS); it hears the agent.
+    assert {"thinking", "speaking"} <= {d["new_state"] for d in of("tester_state_changed")}
+    assert "speaking" in {d["new_state"] for d in of("tester_user_state_changed")}
+    # LiveKit's timings on the tester's clock: when it spoke, and when it heard the agent start (the reply gap's ends).
+    assert all({"started_speaking_at", "stopped_speaking_at"} <= d["metrics"].keys() for d in of("tester_turn"))
+    assert all("started_speaking_at" in d["metrics"] for d in of("tester_heard"))
     assert res["passed"] == 1, res["checks"]  # latency runs from the end of the tester's speech
     greeted = next(ts for ts, _, t, d in evs if t == "conversation_item_added"
                    and d[t]["item"].get("message", {}).get("role") == "ASSISTANT")

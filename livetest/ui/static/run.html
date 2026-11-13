@@ -4,13 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LiveTest report</title>
-<!-- The run page: `report create` bakes a run's rows into the data tag below; the UI (module 11) will fetch the
-     same rows. Everything shown is derived here, from those rows. Look: the R board of the LiveTest UI canvas. -->
+<!-- A run and its tests. `report create` bakes a run's rows into the data tag below; `livetest ui` leaves it empty
+     and the page fetches the same rows from /api/runs/<run>. Everything shown is derived here, from those rows.
+     The run overview is the A board's run screen; a test is the C board: a fixed top (header, cards, checks, the
+     player with both sides' states) over tabs (Traces, Turns, Transcript, Events, Usage, Agent, Logs) and the
+     Inspector. In the app at /runs/<run>/tests/<n>, in the file at #tests/<n>. It shows what was measured, never a
+     verdict of its own: pass and fail come from the scenario's checks. -->
 <style>
+/* Shipped with livetest (OFL); report create puts them inside the file. */
+@font-face{font-family:Inter;font-weight:400 700;font-display:swap;src:url(/fonts/inter.woff2) format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-weight:400 500;font-display:swap;src:url(/fonts/jetbrains-mono.woff2) format('woff2')}
 :root{--bg:#0b0b0c;--bar:#0f0f10;--panel:#141415;--hover:#1c1c1e;--line:#2a2a2d;--line2:#1f1f22;--span:#3a3a3e;
   --text:#f2f2f3;--muted:#a0a0a8;--sub:#c8c8ce;--link:#7dd3fc;
-  --tester:#fdba74;--agent:#7dd3fc;--tool:#c4b5fd;--ok:#4ade80;--okbar:#86efac;--bad:#fb923c;
-  --warnbg:#1d1510;--warnline:#5a3a1a;--warntext:#fed7aa;--why:#fdba74}
+  --tester:#fdba74;--agent:#7dd3fc;--tool:#c4b5fd;--ok:#4ade80;--okbar:#86efac;--bad:#fb923c;--live:#3ecbf5;
+  --warnbg:#1d1510;--warnline:#5a3a1a;--warntext:#fed7aa;
+  /* both sides on the timeline: tester orange, agent blue; a turn's own bar is the darker shade */
+  --tturn:#7c4a1e;--tthink:#fed7aa;--theard:#b45309;--aturn:#1e4a5c;--athink:#c4b5fd;--listen:#2a2a2d;--gap:#4b5563;--mark:#fde047}
 body{margin:0;background:var(--bg);color:var(--text);font:400 14px Inter,system-ui,-apple-system,'Segoe UI',sans-serif}
 a{color:var(--link)}
 [hidden]{display:none!important}
@@ -20,7 +29,8 @@ a{color:var(--link)}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px}
 .h2{margin:0;font-weight:600;font-size:18px}
 .top{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:10px 24px;background:var(--bar);border-bottom:1px solid var(--line);font-size:13px}
-main{box-sizing:border-box;max-width:1180px;margin:0 auto;padding:24px 28px 56px;display:flex;flex-direction:column;gap:22px}
+main{box-sizing:border-box;max-width:1440px;margin:0 auto;padding:24px 28px 56px;display:flex;flex-direction:column;gap:22px}
+#overview,#testview{display:flex;flex-direction:column;gap:14px}
 section{display:flex;flex-direction:column;gap:12px}
 .warn{padding:10px 14px;border-radius:8px;border:1px solid var(--warnline);background:var(--warnbg);color:var(--warntext);font-size:13px;line-height:1.5}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
@@ -37,127 +47,250 @@ section{display:flex;flex-direction:column;gap:12px}
 .row .score{width:70px;font-weight:600}
 .dot{width:22px;height:22px;border:0;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0;padding:0}
 .dot.P{background:#14532d;color:#dcfce7}.dot.F{background:#9a3412;color:#ffedd5}.dot.S{background:var(--line);color:var(--sub)}
-.dot.sel{outline:2px solid var(--text);outline-offset:2px}.dot.dim{opacity:.2}
-.why{padding:14px 16px;border-radius:8px;border:1px solid var(--warnline);background:var(--warnbg);display:flex;flex-direction:column;gap:6px;line-height:1.5;overflow-wrap:anywhere}
-.why b{color:var(--why)}
-.play{width:36px;height:36px;border:0;border-radius:50%;background:var(--text);color:var(--bg);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
-.rows{position:relative;display:flex;flex-direction:column;gap:8px}.playable .track{cursor:pointer}
-/* the playhead spans the track column: name 300px + gap 10px on the left, gap 10px + duration 80px on the right */
-.head{position:absolute;top:0;bottom:0;width:2px;background:#fff;pointer-events:none;left:calc(310px + (100% - 400px) * var(--p, 0))}
-.cols{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start}
-.cols>.panel,.side>.panel{padding:14px 16px}
-.side{flex:1 1 280px;display:flex;flex-direction:column;gap:14px;min-width:0}
-.line{display:flex;gap:12px;font-size:14px;line-height:1.5}
-.line .t{width:36px;flex-shrink:0;padding-top:2px}.line .who{width:90px;flex-shrink:0;font-weight:600}
-.line span:last-child{overflow-wrap:anywhere;min-width:0}
+.dot.R{background:transparent;border:2px solid var(--live);animation:pulse 1.4s infinite}.dot.T{background:transparent;border:2px dashed var(--span)}
+.dot:hover{outline:2px solid var(--text);outline-offset:1px}.dot.dim{opacity:.2}
 .kv{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--line2);font-size:14px;overflow-wrap:anywhere}
-.kv .k{width:150px;flex-shrink:0}
-.span{display:flex;align-items:center;gap:10px;font-size:13px}
-.span .name{width:300px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.track{flex:1;position:relative;height:14px;background:var(--bar);border-radius:3px}
-.track span{position:absolute;top:0;height:14px;min-width:2px;border-radius:3px}
-.span .dur{width:80px;text-align:right}
+.kv .k{width:180px;flex-shrink:0}
 .lvl{min-height:30px;padding:3px 10px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--muted);font-family:inherit;font-size:12px;font-weight:500;cursor:pointer}
 .lvl.on{background:var(--text);color:var(--bg);border-color:var(--text)}
 .logs{background:var(--bg);border:1px solid var(--line2);border-radius:6px;padding:10px 12px;line-height:1.7;overflow-x:auto}
 .logs div{white-space:nowrap}
 .agent{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
-.label{font-size:12px;font-weight:600;margin-bottom:6px;color:var(--muted)}
-pre{margin:10px 0 0;padding:12px;background:var(--bg);border:1px solid var(--line2);border-radius:6px;white-space:pre-wrap;line-height:1.6;color:var(--sub)}
-summary{list-style:none;display:inline-block}
+.label{font-size:12px;font-weight:600;margin:12px 0 6px;color:var(--muted);letter-spacing:.04em}
+pre{margin:10px 0 0;padding:12px;background:var(--bg);border:1px solid var(--line2);border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6;color:var(--sub)}
+summary{cursor:pointer}
 footer{font-size:12px;border-top:1px solid var(--line);padding-top:14px;color:var(--muted)}
-@media (max-width:600px){.top,main{padding-left:16px;padding-right:16px}}
+/* The C board: a test page */
+.tbtn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:34px;box-sizing:border-box;padding:4px 12px;border:1px solid var(--span);border-radius:6px;background:var(--panel);color:var(--text);font:500 13px Inter,system-ui,sans-serif;cursor:pointer;text-decoration:none}
+.tbtn:hover{background:var(--hover);color:var(--text)}.tbtn.on{background:var(--text);border-color:var(--text);color:var(--bg)}
+.tbtn:disabled{opacity:.45;cursor:not-allowed}.tbtn.sm{min-height:28px;padding:2px 10px}
+/* the test's facts: a properties bar, label over value */
+.facts{display:flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:8px;background:var(--panel);overflow:hidden}
+.fact{display:flex;flex-direction:column;gap:2px;padding:7px 14px;border-right:1px solid var(--line);min-width:0;max-width:340px}
+.fact:last-child{border-right:0}.fact span{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.fact b{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.card{padding:10px 12px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.card .k{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--muted)}.card .v{font-size:15px;font-weight:600;overflow-wrap:anywhere}.card .v.sm{font-size:12px;font-weight:500}
+.card .s{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.checks{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.cchip{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:3px 10px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--text);font:500 12px 'JetBrains Mono',ui-monospace,Consolas,monospace;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cchip:hover{border-color:var(--span)}
+/* the player: sticky, so playback and both sides' states stay in view while a tab scrolls */
+#bar{position:sticky;top:0;z-index:5;padding:10px 14px;gap:8px;box-shadow:0 6px 16px rgba(0,0,0,.45)}
+.bands{position:relative;display:flex;flex-direction:column;gap:4px}
+.band{display:grid;grid-template-columns:64px 1fr;align-items:center;gap:8px;font-size:11px;font-weight:600;letter-spacing:.04em}
+.bt{position:relative;height:16px;background:var(--bar);border-radius:3px;cursor:pointer;overflow:hidden}
+.bt span{position:absolute;top:0;bottom:0}.bt.marks{height:12px;background:transparent}
+.bt.marks span{width:3px;border-radius:1px;cursor:pointer}
+.bph{position:absolute;top:0;bottom:0;width:2px;background:#fff;pointer-events:none;left:calc(72px + (100% - 72px) * var(--p, 0))}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:11px;color:var(--muted)}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.tabs{display:flex;flex-wrap:wrap;gap:2px;border-bottom:1px solid var(--line)}
+.tab{padding:8px 14px;border:0;border-bottom:2px solid transparent;background:none;color:var(--muted);font:500 14px Inter,system-ui,sans-serif;cursor:pointer}
+.tab:hover{color:var(--text)}.tab.on{color:var(--text);border-bottom-color:var(--text)}.tab .n{font-size:11px;margin-left:5px;color:var(--muted)}
+.split{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start}
+#pane{flex:999 1 640px;min-width:0;padding:14px 16px;gap:10px}
+#inspector{flex:1 1 320px;min-width:0;padding:16px 18px;gap:10px;position:sticky;top:150px;max-height:calc(100vh - 170px);overflow:auto}
+.tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.q{min-height:30px;box-sizing:border-box;padding:3px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--text);color-scheme:dark;font:400 13px Inter,system-ui,sans-serif}
+.fchip{padding:3px 10px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--muted);font:500 12px Inter,system-ui,sans-serif;cursor:pointer}
+.fchip.on{color:var(--text);border-color:var(--span)}.fchip i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px}
+kbd{padding:1px 5px;border:1px solid var(--span);border-bottom-width:2px;border-radius:4px;font:500 11px 'JetBrains Mono',ui-monospace,Consolas,monospace;color:var(--sub)}
+/* Traces: LiveKit's span tree, one row per span; the playhead spans the track column (name 300px + gap 10px on the
+   left, gap 10px + duration 96px on the right) */
+.rows{position:relative;display:flex;flex-direction:column;gap:6px}
+.span{display:flex;align-items:center;gap:10px;font-size:13px}
+.span .nm{width:300px;flex-shrink:0;display:flex;align-items:center;min-width:0;box-sizing:border-box}
+.span .caret{width:16px;flex-shrink:0;border:0;background:none;color:var(--muted);padding:0;cursor:pointer;font-size:11px}
+.span .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:none;color:var(--text);text-align:left;cursor:pointer;padding:0}
+.span .name:hover{color:var(--link)}.span.lead .name{font-weight:500}
+.track{flex:1;position:relative;height:14px;background:var(--bar);border-radius:3px;cursor:pointer}
+.track span{position:absolute;top:0;height:14px;min-width:2px;border-radius:3px}
+.span .dur{width:96px;text-align:right;white-space:nowrap}
+.phd{position:absolute;top:0;bottom:0;width:2px;background:#fff;pointer-events:none;left:calc(310px + (100% - 416px) * var(--p, 0))}
+table.t{width:100%;border-collapse:collapse;font-size:13px}
+.t th{text-align:left;font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.t th button{border:0;background:none;color:inherit;font:inherit;cursor:pointer;padding:0}.t th button:hover{color:var(--text)}
+.t td{padding:7px 8px;border-bottom:1px solid var(--line2);vertical-align:top;overflow-wrap:anywhere}
+.t tr.click{cursor:pointer}.t tr.click:hover td{background:var(--hover)}.t tr.on td{background:#18222a}
+.t td .clip{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.t td.n{text-align:right;white-space:nowrap;font-family:'JetBrains Mono',ui-monospace,Consolas,monospace;font-size:12px}
+.tw{overflow-x:auto}
+.trow{display:flex;gap:12px;width:100%;box-sizing:border-box;padding:8px 10px;border:0;border-radius:6px;background:transparent;color:var(--text);font:400 15px Inter,system-ui,sans-serif;text-align:left;cursor:pointer;line-height:1.5}
+.trow:hover{background:var(--hover)}.trow.on{background:#18222a}
+.trow .say{display:flex;flex-direction:column;gap:4px;min-width:0;overflow-wrap:anywhere}
+.irow{display:flex;gap:10px;border-bottom:1px solid var(--line2);padding:6px 0}
+.irow .k{width:130px;flex-shrink:0;font-size:13px;color:var(--muted);overflow-wrap:anywhere}.irow .v{font-size:13px;overflow-wrap:anywhere;min-width:0;white-space:pre-wrap}
+/* Served by livetest ui: the app's sidebar (the A board), and the run's actions */
+body.served{display:flex;flex-wrap:wrap;align-items:stretch;min-height:100vh}
+#col{flex:999 1 560px;min-width:0}
+nav{flex:1 1 220px;max-width:100%;box-sizing:border-box;padding:18px 12px;background:var(--bar);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:2px}
+nav .brand{display:flex;align-items:center;gap:10px;padding:4px 12px 14px;font-weight:700;font-size:16px}
+.nav{display:flex;align-items:center;min-height:38px;box-sizing:border-box;padding:7px 12px;border-radius:6px;color:var(--muted);font-weight:500;text-decoration:none}
+.nav:hover{background:var(--hover);color:var(--text)}.nav.on{background:var(--hover);color:var(--text);box-shadow:inset 2px 0 0 var(--text)}
+.navh{display:flex;align-items:center;gap:8px;margin:14px 0 4px;padding:0 12px;font-size:10px;font-weight:600;letter-spacing:.1em;color:#6e6e76}
+.navh::after{content:"";flex:1;height:1px;background:var(--line)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;box-sizing:border-box;padding:6px 14px;border:1px solid var(--span);border-radius:6px;background:var(--panel);color:var(--text);font:500 14px Inter,system-ui,sans-serif;cursor:pointer;text-decoration:none}
+.btn:hover{background:var(--hover);color:var(--text)}.btn.primary{background:var(--text);border-color:var(--text);color:var(--bg)}.btn.primary:hover{background:#fff}
+.btn.sm{min-height:30px;padding:3px 10px;font-size:13px}
+.livedot{width:8px;height:8px;border-radius:50%;background:var(--live);animation:pulse 1.4s infinite;flex-shrink:0}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(62,203,245,.5)}70%{box-shadow:0 0 0 7px rgba(62,203,245,0)}100%{box-shadow:0 0 0 0 rgba(62,203,245,0)}}
+.lives{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.lt{display:flex;flex-direction:column;gap:8px;min-height:150px;padding:14px;border:1px solid var(--line);border-radius:8px;background:var(--bar);color:var(--text);font:inherit;text-align:left;cursor:pointer}
+.lt:hover{border-color:var(--live)}.lt span{font-size:13px;line-height:1.4;overflow-wrap:anywhere}
+/* beside the page, the sidebar stays in view while the page scrolls */
+@media (min-width:800px){nav{position:sticky;top:0;align-self:flex-start;height:100vh;overflow-y:auto}}
+@media (max-width:600px){.top,main{padding-left:16px;padding-right:16px}.span .nm{width:180px}.phd{left:calc(190px + (100% - 296px) * var(--p, 0))}}
 </style>
 </head>
 <body>
+<nav aria-label="Main" id="nav" hidden>
+  <span class="brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12h3l2-6 4 12 2-6h7"/></svg>LiveTest</span>
+  <a class="btn" href="/#jump" style="justify-content:space-between;margin-bottom:8px"><span class="muted">Jump to…</span><span class="mono muted" style="font-size:11px">Ctrl K</span></a>
+  <a class="btn primary" href="/#new" style="margin-bottom:6px"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>New run</a>
+  <span class="navh">TEST</span><a class="nav on" href="/#runs" aria-current="page">Runs</a><a class="nav" href="/#scenarios">Scenarios</a><a class="nav" href="/#profiles">Profiles</a>
+  <span class="navh">SETUP</span><a class="nav" href="/#agents">Agents</a><a class="nav" href="/#plugins">Plugins</a><a class="nav" href="/#settings">Settings</a>
+</nav>
+<div id="col">
 <header class="top">
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12h3l2-6 4 12 2-6h7"/></svg>
-  <span style="font-weight:700">LiveTest report</span>
+  <span id="brand" style="display:contents">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12h3l2-6 4 12 2-6h7"/></svg>
+    <span style="font-weight:700">LiveTest report</span>
+  </span>
   <span class="mono muted" id="file"></span>
   <span class="muted" id="made"></span>
+  <span id="save" style="margin-left:auto;display:flex;align-items:center;gap:8px"></span>
 </header>
 <main>
   <div class="warn" id="warn"></div>
-  <section id="summary"></section>
-  <section id="problems"></section>
-  <section id="scenarios" class="panel" style="overflow:hidden;gap:0"></section>
-  <section id="test"></section>
-  <section id="traces" class="panel" style="padding:14px 16px;gap:8px"></section>
-  <section id="logs" class="panel" style="padding:14px 16px;gap:10px"></section>
-  <section id="agent" class="panel" style="padding:14px 16px;gap:10px"></section>
+  <div id="overview">
+    <section id="summary"></section>
+    <section id="live" aria-label="Live now" hidden></section>
+    <section id="problems"></section>
+    <section id="scenarios" class="panel" style="overflow:hidden;gap:0"></section>
+  </div>
+  <div id="testview" hidden>
+    <section id="thead" style="gap:10px"></section>
+    <section id="cards" style="gap:10px"></section>
+    <section id="bar" class="panel" aria-label="Player"></section>
+    <div id="tabs" class="tabs" role="toolbar" aria-label="Test views"></div>
+    <div class="split">
+      <section id="pane" class="panel">
+        <div id="tools" class="tools"></div>
+        <div id="body"></div>
+      </section>
+      <section id="inspector" class="panel" aria-label="Inspector"></section>
+    </div>
+    <audio id="audio" preload="metadata"></audio>
+  </div>
   <footer id="footer"></footer>
 </main>
+</div>
 <script id="data" type="application/json">null</script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);  // every row value is untrusted
 const num = n => Math.round(n).toLocaleString('en-US');
 const compact = n => new Intl.NumberFormat('en', {notation: 'compact'}).format(n);
-const ms = s => `${num(s * 1000)} ms`;
+const ms = s => s === Infinity ? 'no reply' : s == null || isNaN(s) ? '—' : `${num(s * 1000)} ms`;  // Infinity: a turn the agent never answered
 const at = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const at3 = s => `${at(s)}.${String(Math.floor(s * 1000) % 1000).padStart(3, '0')}`;
 const json = v => typeof v === 'string' ? v : JSON.stringify(v);
 const when = s => s ? new Date(s.replace(' ', 'T') + 'Z').toLocaleString('en-GB', {dateStyle: 'medium', timeStyle: 'short'}) : '';  // SQLite's UTC
 const clock = s => Date.parse(String(s).replace(/(\.\d{3})\d+/, '$1')) / 1000;  // an agent timestamp in unix s (ns cut to ms)
-const p95 = gaps => { const g = [...gaps].sort((a, b) => a - b); return g.length ? g[Math.ceil(0.95 * g.length) - 1] : null; };  // nearest rank, as checks.py
-const GLYPH = {P: '✓', F: '✗', S: '■'};
+const rankAt = (vs, q) => { const g = [...vs].sort((a, b) => a - b); return g.length ? g[Math.ceil(q * g.length) - 1] : null; };  // nearest rank, as checks.py
+const p95 = vs => rankAt(vs, 0.95);
+const GLYPH = {P: '✓', F: '✗', S: '■', R: '', T: ''};
 const ICON = {play: '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>',
               pause: '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 3h3v10H4zM9 3h3v10H9z"/></svg>'};
 const LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR'];
 const rank = lvl => lvl === 'CRITICAL' ? 9 : LEVELS.indexOf(lvl);
-const UNITS = {input_tokens: 'in', input_cached_tokens: 'cached', output_tokens: 'out', characters_count: 'chars', audio_duration: 's audio'};
+const kind = lvl => lvl === 'CRITICAL' ? 'ERROR' : lvl;  // the toggle a line belongs to
 const UNGRADED = ['stopped', 'queued', 'running', 'stopping'];
+const LIVE = ['running', 'stopping'];
+// LiveKit's per-turn metrics, as the Inspector names them (its spans: llm_node, tts_node, stt, end of turn).
+const MET = {llm_node_ttft: 'llm_node · first token', tts_node_ttfb: 'tts_node · first byte', e2e_latency: 'end to end',
+             transcription_delay: 'stt · transcription', end_of_turn_delay: 'eou · end of turn', on_user_turn_completed_delay: 'on_user_turn_completed',
+             llm_node_tps: 'llm_node · tokens / s'};
+// The session host's events the trace builds from; any other one (end-of-turn decisions, the agent's STT live,
+// overlapping speech, false interruptions, debug messages...) shows as a point on the trace and in Events.
+const BUILT = new Set(['agent_state_changed', 'user_state_changed', 'conversation_item_added', 'tool_execution_updated', 'function_tools_executed',
+                       'session_usage_updated', 'error']);
+const HEARING = new Set(['user_input_transcribed', 'eot_prediction']);  // the agent hearing the tester: under the tester's turn
+const KIND = {latency: ['#0e2a35', '#7dd3fc'], check: ['#3b1d0d', '#fdba74'], 'agent error': ['#2a2a2d', '#c8c8ce'], test: ['#3b1d0d', '#fdba74']};
+// Span kinds: the colour of their bar and the filter chip that hides them.
+const SPAN = {tester: ['tester', 'Tester'], agent: ['agent', 'Agent'], tool: ['okbar', 'Tools'],
+              hearing: ['theard', 'Agent hearing'], gap: ['gap', 'Reply gaps'], error: ['bad', 'Errors'], event: ['mark', 'Other events']};
+const STATE = {agent: {speaking: 'agent', thinking: 'athink', listening: 'listen'}, tester: {speaking: 'tester', thinking: 'tthink', listening: 'listen'}};
 
+// Failed by how it ended: it never got going, or the agent didn't greet / reply in 10 s (store.finish_result).
+const endedBadly = r => dot(r) === 'F' && (r.status !== 'done' || ['no_greeting', 'no_reply'].includes(r.ended));
 const outcome = r => r.passed === 1 ? 'passed' : r.passed === 0 ? 'failed' : r.status === 'stopped' ? 'stopped by user' : r.status.replaceAll('_', ' ');
-const dot = r => r.passed === 1 ? 'P' : UNGRADED.includes(r.status) ? 'S' : 'F';  // never joined / no session host / error count as failures
-let R, S = {sel: 0, prob: null, lvl: 'INFO'};
+const dot = r => r.passed === 1 ? 'P' : r.status === 'running' || r.status === 'stopping' ? 'R' : r.status === 'queued' ? 'T' : UNGRADED.includes(r.status) ? 'S' : 'F';  // never joined / no session host / error count as failures
+let R, served = false, timer;
+const S = {view: null, prob: null, lvls: new Set(['INFO', 'WARNING', 'ERROR']), t: 0, speed: 1, insp: null, playing: false, rep: false, cur: -1,
+           tab: 'traces', q: '', hide: new Set(), closed: new Set(), sort: ['n', 1], evType: '', evQ: ''};
+const cur = () => R.results.find(r => r.test === S.view);
+const stopButton = (what, test) => served && R.run.status === 'running' ? `<button class="btn${test ? ' sm' : ''}" onclick="stopRun(${test || ''})" title="ends the conversations in progress; what they recorded is kept">Stop ${what}</button>` : '';
+// Re-run failed / Run again: the app's New run drawer, filled in from this run (same agent, profile, mode and repeats).
+function again(only) {
+  const picks = {};
+  for (const r of R.results) if (!only || only.has(r.scenario.name)) picks[r.scenario.name] = (picks[r.scenario.name] || 0) + 1;
+  return '/#new=' + encodeURIComponent(JSON.stringify({title: only ? 'failed' : 'again', agent: R.run.agent, profile: R.run.profile, mode: R.run.mode, picks}));
+}
+const name = s => String(s || '').replace(/^(AS|US)_/, '').toLowerCase();  // AS_SPEAKING → speaking
 
-// One test's timeline from its events: the tester's clock places everything; the agent's only times tools.
+// One test's timeline from its events: the tester's clock places everything; the agent's only gives durations.
+// Reply gaps come paired from checks.replies (r.replies), as the latency check grades them.
 function derive(r) {
   const ev = r.events, t0 = r.recording_started_at ?? (ev.length ? ev[0][0] : 0);
-  const x = {t0, D: Math.max(1, ev.reduce((m, e) => Math.max(m, e[0]), t0) - t0), convo: [], speaking: [], gaps: [], tools: [], errors: [], logs: [], info: {},
-             turns: [], heard: [], replies: [], offset: Infinity};
-  const started = {}, outputs = {};
-  let turn = 0, waiting = null, agentFrom = null, busy = null;
+  const x = {t0, D: Math.max(1, ev.reduce((m, e) => Math.max(m, e[0]), t0) - t0), convo: [], speaking: [], tools: [], errors: [],
+             logs: [], info: {}, turns: [], heard: [], replies: [], states: [], ustates: [], tstates: [], theard: [], marks: [],
+             gaps: (r.replies || []).filter(g => g.gap != null).map(g => ({turn: g.turn, a: g.at, b: g.at + g.gap}))};
+  const started = {}, outputs = {}, open = {};  // open: the state each side is in since when
+  const state = (list, key, ts, to) => { if (open[key]) list.push({...open[key], b: ts}); open[key] = {name: name(to), a: ts}; };
+  let turn = 0, agentFrom = null, busy = null;
   for (const [ts, source, type, d] of ev) {
     const e = d[type] || {};  // session-host events nest under their own name
-    // Agent clock → tester clock: the smallest receive delay (the machines' clocks may differ).
-    if (d.created_at) x.offset = Math.min(x.offset, ts - clock(d.created_at));
     if (source === 'log') x.logs.push({ts, lvl: type, msg: `${d.logger}: ${d.message}`});
-    else if (type === 'tester_turn') { turn++; waiting = {a: ts, turn}; x.convo.push({ts, who: 'tester', text: d.text}); }
-    else if (type === 'tester_heard') x.convo.push({ts, who: 'tester heard', text: d.text, heard: true});  // voice: the tester's STT
+    // m: LiveKit's timings of the tester's line (voice: when it spoke) or of what it heard (when the agent's voice started)
+    else if (type === 'tester_turn') x.convo.push({ts, who: 'tester', n: ++turn, text: d.text, cut: !!d.interrupted, m: d.metrics || {}});
+    else if (type === 'tester_heard') x.convo.push({ts, who: 'tester heard', text: d.text, m: d.metrics || {}});  // voice: the tester's STT
+    else if (type === 'tester_state_changed') state(x.tstates, 'tester', ts, d.new_state);  // voice: the tester's own states
+    else if (type === 'tester_user_state_changed') state(x.theard, 'theard', ts, d.new_state);  // voice: the tester hearing the agent
+    else if (type === 'user_state_changed') state(x.ustates, 'user', ts, e.new_state);  // the agent's view of the user
     else if (type === 'conversation_item_added' && e.item?.message) {
       const m = e.item.message, agent = m.role === 'ASSISTANT';  // a USER item: what the agent took in
       const text = (m.content || []).map(c => c.text || '').join(' ');
-      x.convo.push({ts, who: agent ? 'agent' : 'agent heard', heard: !agent, text});
+      x.convo.push({ts, who: agent ? 'agent' : 'agent heard', text, m: m.metrics || {}});
       if (m.metrics) (agent ? x.replies : x.heard).push({ts, text, ...m.metrics});  // the agent's own per-turn timings
     } else if (type === 'agent_state_changed') {
+      state(x.states, 'agent', ts, e.new_state);
       // agent_turn, as LiveKit traces it: thinking or speaking until it listens again
       const now = ['AS_THINKING', 'AS_SPEAKING'].includes(e.new_state);
       if (now && !busy) busy = {a: ts};
       else if (!now && busy) { x.turns.push({...busy, b: ts}); busy = null; }
       if (agentFrom !== null) { x.speaking.push({a: agentFrom, b: ts}); agentFrom = null; }
-      if (e.new_state === 'AS_SPEAKING') {
-        agentFrom = ts;
-        if (waiting) { x.gaps.push({...waiting, b: ts}); waiting = null; }  // tester_turn → AS_SPEAKING, as checks.py
-      }
+      if (e.new_state === 'AS_SPEAKING') agentFrom = ts;
     } else if (type === 'tool_execution_updated') {
       if (e.started) { const c = e.started.function_call; started[c.call_id] = {ts, at: d.created_at, name: c.name, args: c.arguments || ''}; }
       else if (e.ended && started[e.ended.call_id]) {
         const s = started[e.ended.call_id], took = clock(d.created_at) - clock(s.at);
-        x.tools.push({...s, call: e.ended.call_id, took: isNaN(took) ? ts - s.ts : took});
+        x.tools.push({...s, call: e.ended.call_id, took: isNaN(took) ? ts - s.ts : took, status: e.ended.status});
       }
     } else if (type === 'function_tools_executed') {
       if (busy) { x.turns.push({...busy, b: ts}); busy = {a: ts}; }  // LiveKit starts a new agent_turn after a tool
       for (const o of e.function_call_outputs || []) outputs[o.call_id] = o;
       for (const c of e.function_calls || []) x.convo.push({ts, who: 'tool', call: c.call_id, text: `${c.name}(${c.arguments || ''})`});
-    } else if (type === 'error' && source === 'agent') x.errors.push({ts, msg: d.error?.message || 'agent error'});
-    else if (['framework', 'agent_info', 'session_state', 'seen'].includes(type)) x.info[type] = d;
+    } else if (type === 'error' && source === 'agent') x.errors.push({ts, msg: d.error?.message || 'agent error', raw: d});
+    else if (['framework', 'agent_info', 'session_state', 'seen', 'chat_history'].includes(type)) x.info[type] = d;
+    else if (source === 'agent' && !BUILT.has(type)) x.marks.push({ts, type, v: e, raw: d});
   }
   const end = x.t0 + x.D;
+  for (const [list, key] of [[x.states, 'agent'], [x.ustates, 'user'], [x.tstates, 'tester'], [x.theard, 'theard']]) if (open[key]) list.push({...open[key], b: end});
   if (agentFrom !== null) x.speaking.push({a: agentFrom, b: end});
   if (busy) x.turns.push({...busy, b: end});
-  if (!isFinite(x.offset)) x.offset = 0;
-  for (const t of x.tools) t.error = !!outputs[t.call]?.is_error;
+  for (const t of x.tools) { t.error = !!outputs[t.call]?.is_error; t.output = outputs[t.call]?.output ?? ''; }
   for (const l of x.convo.filter(l => l.call)) {
     const t = x.tools.find(t => t.call === l.call), o = outputs[l.call];
     l.text += (t ? ` · ${ms(t.took)}` : '') + (o ? ` → ${o.output ?? ''}` : '');
@@ -166,13 +299,16 @@ function derive(r) {
   return x;
 }
 
-function problemList() {
+// LiveKit's error text is a repr; its provider's message (or the exception's name) makes the label.
+const brief = m => (m.match(/'message': '([^']+)/)?.[1] || m.match(/error=(\w+)/)?.[1] || m).slice(0, 60);
+
+function problemList() {  // the run's failed checks and agent errors, grouped by check
   const groups = {};
   const add = (key, kind, title, r) => { const g = groups[key] ??= {key, kind, title, tests: new Set(), scen: new Set()}; g.tests.add(r.test); g.scen.add(r.scenario.name); };
   for (const r of R.results) {
     for (const c of r.checks || []) if (!c.passed) add(c.check, c.check === 'latency' ? 'latency' : 'check', `${c.check} failed: expected ${json(c.expected)}`, r);
-    if (dot(r) === 'F' && r.status !== 'done') add(r.status, 'test', `${outcome(r)}: ${r.ended || ''}`, r);
-    if (r.agent_errors) add('agent_errors', 'agent errors', `last: ${r.last_error || 'agent error'}`, r);
+    if (endedBadly(r)) add(r.status === 'done' ? r.ended : r.status, 'test', `${outcome(r)}: ${r.ended || ''}`, r);
+    if (r.agent_errors) add('agent_errors', 'agent errors', `last: ${brief(r.last_error || 'agent error')}`, r);
   }
   return Object.values(groups);
 }
@@ -185,199 +321,682 @@ function tokens(results, side) {
   return t;
 }
 
+// ---- a test: what its views are drawn from ----
+
+function lay(r) {  // turns with their times, and what failed: what the transcript, markers and inspector show
+  if (r.c) return r.c;
+  const x = r.x, t0 = x.t0, end = t0 + x.D, made = new Map();
+  const turns = x.convo.filter(l => !l.who.endsWith('heard')).map(l => { const u = {...l, hms: []}; made.set(l, u); return u; });
+  // When each was said, by LiveKit's timings: the tester's speaking (voice, on its own clock); an agent reply lands as
+  // it ends, lasting as long as the agent says it spoke (its timestamps come as text, on its clock); else the moment.
+  const secs = v => typeof v === 'string' ? clock(v) : v;
+  for (const u of turns) {
+    const m = u.m || {}, spoke = secs(m.stopped_speaking_at) - secs(m.started_speaking_at);
+    [u.a, u.b] = !(spoke > 0) ? [u.ts, u.ts] : u.who === 'tester' ? [m.started_speaking_at, m.stopped_speaking_at] : [u.ts - spoke, u.ts];
+  }
+  // Who heard what, by the order and timings LiveKit gives, no time windows:
+  // - what the agent heard (its USER items; it may split one tester turn into several) goes to the latest tester turn
+  //   that had started by then;
+  // - an agent reply answers the tester turn of the last thing the agent heard before it (`turn`; 0: it opened);
+  // - what the tester heard goes to the first agent reply still unfinished when the tester heard its voice start.
+  const said = turns.filter(u => u.who === 'tester'), replied = turns.filter(u => u.who === 'agent');
+  const owner = ts => said.findLast(u => u.a <= ts) ?? said[0];
+  const hear = (u, l) => { u.heard = u.heard == null ? l.text : `${u.heard} ${l.text}`; u.hms.push({ts: l.ts, text: l.text, m: l.m || {}}); u.hm ??= l.m || {}; };
+  let last = 0;
+  for (const l of x.convo) {  // as logged: the agent sends its items in order
+    if (l.who === 'agent heard') { const u = owner(l.ts); if (u) { last = u.n; hear(u, l); } }
+    else if (l.who === 'agent') made.get(l).turn = last;
+    else if (l.who === 'tester heard') { const u = replied.find(u => u.ts >= (l.m.started_speaking_at ?? l.ts)) ?? replied.at(-1); if (u) hear(u, l); }
+  }
+  turns.sort((p, q) => p.a - q.a);  // in the order they were said, not logged (a voice line is logged when it ends)
+  const lat = r.scenario.expect?.find(e => e.type === 'latency'), limit = lat ? (lat.p95_ms ?? lat.p99_ms) / 1000 : null;
+  // Only what was measured: the scenario's own checks that failed, gaps over its latency limit, the agent's errors,
+  // and a test that didn't finish. No verdict of livetest's own.
+  const probs = [];
+  if (limit) for (const g of x.gaps) if (g.b - g.a > limit) probs.push({ts: g.a, kind: 'latency', label: `reply gap ${ms(g.b - g.a)}`,
+    rows: [['gap', ms(g.b - g.a)], ['limit', ms(limit)]]});
+  for (const c of r.checks || []) if (!c.passed) {
+    const tool = c.check === 'tool_not_called' && x.tools.find(t => t.name === c.expected?.name);  // where it was called; else at the end
+    probs.push({ts: tool ? tool.ts : end, kind: 'check', label: c.check, rows: [['expected', json(c.expected)], ['actual', json(c.actual)]]});
+  }
+  for (const e of x.errors) probs.push({ts: e.ts, kind: 'agent error', label: brief(e.msg), rows: [['message', e.msg]]});
+  if (endedBadly(r)) probs.push({ts: end, kind: 'test', label: outcome(r), rows: [['status', r.status], ['ended', r.ended || '—']]});
+  probs.sort((a, b) => a.ts - b.ts);
+  return r.c = {turns, probs, limit, owner};
+}
+
+const model = (r, kind, side = 'agent') => (r.usage?.[side] || []).find(u => u.kind === kind)?.model;
+const point = (e, t0) => {  // any other session-host event, as a point on the trace: its time where a duration would be
+  const v = e.v || {}, say = v.transcript ?? v.text ?? v.message;
+  return {name: `agent · ${e.type}${say ? ` · ${say}` : ''}${v.is_final === false ? ' (interim)' : ''}`, kind: HEARING.has(e.type) ? 'hearing' : 'event', lk: e.type,
+          a: e.ts, b: e.ts, dur: `at ${at3(e.ts - t0)}`, more: Object.entries(v).map(([k, w]) => [k, json(w)]), raw: e.raw};
+};
+
+// Both sides' turns; every row names its side first (tester · / agent ·), LiveKit's span name kept as `lk`:
+// tester turn = tester · thinking (its LLM; text: from the agent's last words to its line), tester · speaking (voice),
+// and the agent hearing it: its transcripts and end-of-turn decisions as they arrived. agent turn (agent_turn) =
+// thinking or speaking until it listens again: agent · thinking, tool (function_tool), speaking (agent_speaking),
+// error, and the reply gap that opened it. Only what was seen on the tester's clock is a bar: the agent's per-turn
+// timings (stt, end of turn, llm first token, tts first byte, e2e) are LiveKit's numbers, listed with the turn.
+function sides(r) {
+  if (r.sd) return r.sd;
+  const x = r.x, t0 = x.t0, c = lay(r);
+  const said = x.convo.filter(l => l.who === 'tester'), replies = x.convo.filter(l => l.who === 'agent');
+  const heardBy = c.turns.filter(u => u.who === 'tester'), tllm = model(r, 'llm', 'tester'), ttts = model(r, 'tts', 'tester');
+  const tester = said.map((l, k) => {
+    const p = k ? said[k - 1].ts : t0, kids = [], u = heardBy[k];
+    if (x.tstates.length) {  // voice: its own thinking (its states), and its speaking as LiveKit timed it
+      for (const s of x.tstates) if (s.name === 'thinking' && s.a > p && s.a <= u.a)
+        kids.push({name: `tester · thinking${tllm ? ` · ${tllm}` : ''}`, kind: 'tester', a: s.a, b: s.b, c: 'tthink'});
+      if (u.b > u.a) kids.push({name: `tester · speaking${ttts ? ` · ${ttts}` : ''}`, kind: 'tester', a: u.a, b: u.b, c: 'tester'});
+    } else {  // text: its LLM wrote the line after the agent's last words
+      const from = replies.filter(m => m.ts > p && m.ts < l.ts).at(-1)?.ts ?? p;
+      kids.push({name: `tester · thinking${tllm ? ` · ${tllm}` : ''}`, kind: 'tester', a: from, b: l.ts, c: 'tthink'});
+    }
+    // The agent's STT live: one row per final transcript; the interim ones before it go in its Inspector entry.
+    let interim = [];
+    for (const e of x.marks.filter(e => HEARING.has(e.type) && c.owner(e.ts) === u)) {
+      if (e.type === 'user_input_transcribed' && e.v?.is_final === false) { interim.push(e); continue; }
+      const s = point(e, t0);
+      if (e.type === 'user_input_transcribed') s.name = `agent · transcript “${e.v.transcript ?? ''}”`;
+      if (interim.length) s.more.push(['interim before it', interim.map(i => `${at3(i.ts - t0)}  ${i.v.transcript ?? ''}`).join('\n')]);
+      kids.push(s);
+      interim = [];
+    }
+    if (interim.length) kids.push({...point(interim.at(-1), t0), name: `agent · transcript “${interim.at(-1).v.transcript ?? ''}” (interim, no final)`});
+    const cut = l.cut ? [['interrupted', `after ${ms(u.b - u.a)} of speaking: the text may hold more than was spoken; “agent heard” is what got through`, 'var(--bad)']] : [];
+    return {name: `tester turn ${k + 1}${l.cut ? ' · interrupted' : ''} · ${l.text}`, kind: 'tester', a: Math.min(l.ts, ...kids.map(s => s.a)), b: Math.max(l.ts, ...kids.map(s => s.b)),
+            c: 'tturn', kids, ts: l.ts, more: [...cut, ['said', l.text], ['agent heard', u?.heard ?? '—'], ...Object.entries(u?.hm || {}).filter(([k]) => MET[k]).map(([k, v]) => [MET[k], ms(v)])]};
+  });
+  const agent = x.turns.map((t, k) => {
+    const reply = replies.find(m => m.ts >= t.a - 0.05 && m.ts <= t.b + 1);
+    return {name: `agent turn ${k + 1}${reply ? ` · ${reply.text}` : ''}`, kind: 'agent', a: t.a, b: t.b, c: 'aturn', kids: [], t, lk: 'agent_turn',
+            more: reply ? [['reply', reply.text]] : []};
+  });
+  const loose = [], turnOf = ts => agent.findLast(a => a.a <= ts + 0.01);
+  const under = (ts, s) => { const a = turnOf(ts); a ? a.kids.push(s) : loose.push({...s, kids: []}); };
+  for (const s of x.states) if (s.name === 'thinking') {  // clipped to each agent_turn it overlaps (LiveKit splits a turn after a tool)
+    const over = agent.filter(a => a.a < s.b && a.b > s.a);
+    if (!over.length) loose.push({name: 'agent · thinking', kind: 'agent', a: s.a, b: s.b, c: 'athink', kids: []});
+    for (const a of over) a.kids.push({name: 'agent · thinking', kind: 'agent', a: Math.max(s.a, a.a), b: Math.min(s.b, a.b), c: 'athink'});
+  }
+  for (const m of x.replies) turnOf(m.ts)?.more.push(...Object.entries(m).filter(([k]) => MET[k]).map(([k, v]) => [MET[k], k.endsWith('tps') ? num(v) : ms(v)]));
+  for (const g of x.gaps) {
+    const over = c.limit && g.b - g.a > c.limit;
+    under(g.b, {name: `reply gap · after tester turn ${g.turn}`, kind: 'gap', a: g.a, b: g.b, c: over ? 'bad' : 'gap', dur: `gap ${ms(g.b - g.a)}`,
+                more: [['tester turn ended', at3(g.a - t0)], [R.run.mode === 'voice' ? 'tester heard the agent start' : 'agent started its reply', at3(g.b - t0)],
+                       ...(c.limit ? [['limit (scenario)', ms(c.limit)]] : [])]});
+  }
+  for (const t of x.tools) under(t.ts, {name: `agent · tool · ${t.name} ${t.args}`, kind: 'tool', lk: 'function_tool', a: t.ts, b: t.ts + t.took, c: t.error ? 'bad' : 'okbar',
+    more: [['status', t.status || (t.error ? 'error' : 'done'), t.error ? 'var(--bad)' : 'var(--okbar)'], ['arguments', t.args || '{}'], ['output', json(t.output)]]});
+  for (const s of x.speaking) under(s.a, {name: 'agent · speaking', kind: 'agent', a: s.a, b: s.b, c: 'agent', lk: 'agent_speaking'});
+  for (const e of x.errors) under(e.ts, {name: `agent · error · ${brief(e.msg)}`, kind: 'error', lk: 'error', a: e.ts, b: e.ts, c: 'bad', dur: '', more: [['message', e.msg]], raw: e.raw});
+  for (const e of x.marks) if (!HEARING.has(e.type)) under(e.ts, point(e, t0));
+  return r.sd = {tester, agent, loose};
+}
+
+// The span tree: agent_session → tester_turn and agent_turn (by start), each with its spans.
+function spans(r) {
+  if (r.sp) return r.sp;
+  const x = r.x, sd = sides(r), byStart = (p, q) => p.a - q.a;
+  return r.sp = [{name: `session · test #${r.test}`, lk: 'agent_session', kind: 'session', a: x.t0, b: x.t0 + x.D, c: 'span', lvl: 0},
+    ...[...sd.tester, ...sd.agent, ...sd.loose].sort(byStart).flatMap(s => [{...s, lvl: 1}, ...s.kids.sort(byStart).map(k => ({...k, lvl: 2}))])];
+}
+
+// One row per exchange: what the tester said, what the agent heard, how fast it answered, and what it did.
+function exchanges(r) {
+  if (r.ex) return r.ex;
+  const x = r.x, t0 = x.t0, c = lay(r), end = t0 + x.D;
+  const said = c.turns.filter(u => u.who === 'tester'), replies = c.turns.filter(u => u.who === 'agent'), rows = [];
+  for (let n = 0; n <= said.length; n++) {  // 0: the agent opens
+    const t = said.find(u => u.n === n), mine = replies.filter(u => u.turn === n);
+    if (!t && !mine.length) continue;
+    const g = x.gaps.find(g => g.turn === n), m = mine[0]?.m || {}, hm = t?.hm || {}, from = t ? t.ts : t0 - 1, to = said.find(u => u.n === n + 1)?.ts ?? end;
+    rows.push({n, a: (t ?? mine[0]).a - t0, said: t ? `${t.cut ? '[interrupted] ' : ''}${t.text}` : '(the agent opens)', heard: t?.heard ?? '',
+               gap: g ? g.b - g.a : r.replies?.some(g => g.turn === n) ? Infinity : null,  // Infinity: never answered
+               ttft: m.llm_node_ttft ?? null, ttfb: m.tts_node_ttfb ?? null, e2e: m.e2e_latency ?? null, stt: hm.transcription_delay ?? null,
+               eou: hm.end_of_turn_delay ?? null, tools: x.tools.filter(o => o.ts > from && o.ts <= to).map(o => o.name), reply: mine.map(u => u.text).join(' ')});
+  }
+  return r.ex = rows;
+}
+
+// What the Inspector shows for each thing on the page (and Copy as JSON copies).
+const inspect = {
+  turn(r, u) {
+    const x = r.x, rows = [['spoken', u.b > u.a ? `${at3(u.a - x.t0)} – ${at3(u.b - x.t0)} · ${ms(u.b - u.a)}` : at3(u.a - x.t0)]];
+    if (u.who === 'agent') {
+      const c = lay(r), g = c.turns.find(o => o.who === 'agent' && o.turn === u.turn) === u && x.gaps.find(g => g.turn === u.turn);  // on its turn's first reply
+      if (g) rows.push(['reply gap', ms(g.b - g.a), !c.limit ? '' : g.b - g.a > c.limit ? 'var(--tester)' : 'var(--okbar)']);  // against the scenario's limit only
+      for (const [k, v] of Object.entries(u.m || {})) if (MET[k]) rows.push([MET[k], k.endsWith('tps') ? num(v) : ms(v)]);
+      const prev = c.turns.filter(o => o.who === 'tester' && o.ts < u.ts).at(-1)?.ts ?? x.t0;
+      for (const t of x.tools.filter(t => t.ts >= prev && t.ts <= u.ts)) rows.push(['function_tool', `${t.name} · ${ms(t.took)}`, t.error ? 'var(--bad)' : '']);
+      if (u.heard != null) rows.push(['tester heard', u.heard]);
+    } else if (u.who === 'tester') {
+      rows.push(['said', u.text]);
+      if (u.heard != null) rows.push(['agent heard', u.heard]);
+      for (const [k, v] of Object.entries(u.hm || {})) if (MET[k]) rows.push([MET[k], ms(v)]);
+    } else rows.push(['call', u.text]);
+    return {kind: 'turn', at: u.a - x.t0, title: `${u.who} · turn ${lay(r).turns.filter(o => o.who === u.who).indexOf(u) + 1}`, rows, text: u.text};
+  },
+  span: (r, s) => ({kind: s.kind === 'session' ? 'session' : `span · ${SPAN[s.kind]?.[1] || s.kind}`, at: s.a - r.x.t0, title: s.name,
+    rows: [['start', at3(s.a - r.x.t0)], ['end', at3(s.b - r.x.t0)], ['duration', s.dur || ms(s.b - s.a)], ...(s.lk ? [['LiveKit span', s.lk]] : []), ...(s.more || [])], raw: s.raw}),
+  problem: (r, p) => ({kind: p.kind, at: p.ts - r.x.t0, title: p.label, rows: [['at', at3(p.ts - r.x.t0)], ...p.rows]}),
+  row: (r, e) => ({kind: 'exchange', at: e.a, title: e.n ? `exchange ${e.n}` : 'the agent opens',
+    rows: [['tester said', e.said], ['agent heard', e.heard || '—'], ['reply gap', ms(e.gap)], ['llm first token', ms(e.ttft)], ['tts first byte', ms(e.ttfb)],
+           ['end to end', ms(e.e2e)], ['stt', ms(e.stt)], ['end of turn', ms(e.eou)], ['tools', e.tools.join(', ') || '—'], ['agent replied', e.reply || '—']]}),
+  event: (r, e) => ({kind: `event · ${e[1]}`, at: e[0] - r.x.t0, title: e[2], rows: [['at', at3(e[0] - r.x.t0)], ['source', e[1]]], raw: e[3]}),
+  check: (r, c) => ({kind: 'check', at: null, title: `${c.passed ? '✓' : '✗'} ${c.check}`, rows: [['expected', json(c.expected)], ['actual', json(c.actual)]]}),
+  item: (r, it) => ({kind: 'chat item', at: null, title: it.label, rows: [], raw: it.raw}),
+};
+const events = r => r.events.filter(e => e[1] !== 'log');
+// A clickable thing on the page is (kind, index) into these, so the HTML is the same on every redraw.
+const things = r => ({turn: lay(r).turns, span: spans(r), problem: lay(r).probs, row: exchanges(r), event: events(r), check: r.checks || [], item: chatItems(r)});
+
+function chatItems(r) {  // the agent's chat context at join, then its whole history (turns, tool calls, handoffs, config updates)
+  if (r.ci) return r.ci;
+  const i = r.x.info, list = (from, items) => (items || []).map(item => {
+    const [k, v] = Object.entries(item)[0] || ['?', {}];
+    const label = k === 'message' ? `${name(v.role)}: ${(v.content || []).map(c => c.text ?? json(c)).join(' ')}`
+      : k === 'function_call' ? `function_call: ${v.name}(${v.arguments || ''})` : k === 'function_call_output' ? `output: ${v.output ?? ''}`
+      : k === 'agent_handoff' ? `handoff → ${v.new_agent_id || '?'}${v.old_agent_id ? ` (from ${v.old_agent_id})` : ''}`
+      : `${k}: ${Object.keys(v).filter(f => !['id', 'created_at'].includes(f)).join(', ')}`;
+    return {from, kind: k, label, raw: item};
+  });
+  return r.ci = [...list('at join', i.agent_info?.chat_ctx), ...list('history', i.chat_history?.items)];
+}
+
 const sections = {
+  // ---- the run overview: the A board's run screen ----
   summary() {
     const rs = R.results, run = R.run, graded = rs.filter(r => r.passed !== null), passed = graded.filter(r => r.passed === 1).length;
     const stopped = rs.filter(r => r.status === 'stopped').length, failed = rs.filter(r => dot(r) === 'F').length;
-    const gaps = rs.flatMap(r => r.x.gaps.map(g => g.b - g.a)), a = tokens(rs, 'agent'), t = tokens(rs, 'tester');
-    const errors = rs.reduce((n, r) => n + r.agent_errors, 0), cached = x => x.i ? `${Math.round(x.c / x.i * 100)}% cached` : 'none reported';
+    const turns = rs.flatMap(r => r.replies || []), unanswered = turns.filter(g => g.gap == null).length, a = tokens(rs, 'agent'), t = tokens(rs, 'tester');
+    const errors = rs.reduce((n, r) => n + r.agent_errors, 0), cached = x => `as reported by LiveKit${x.i ? ` · ${Math.round(x.c / x.i * 100)}% cached` : ''}`;
     const lastEnd = rs.map(r => r.finished_at).filter(Boolean).sort().pop();
     const tiles = [
       ['Score', `${passed} / ${graded.length}`, `${graded.length ? Math.round(passed / graded.length * 100) : 0}% passed` + (stopped ? ` · ${stopped} stopped by user` : ''), ''],
-      ['Failed', failed, `${R.problems.length} problems`, failed ? 'var(--bad)' : ''],
-      ['Reply p95', gaps.length ? ms(p95(gaps)) : '—', `${gaps.length} replies`, ''],
+      ['Failed', failed, `${rs.reduce((n, r) => n + (r.checks || []).filter(c => !c.passed).length, 0)} failed checks`, failed ? 'var(--bad)' : ''],
+      // R.reply_p95_ms: checks.rank over checks.replies, as the latency check grades it; null with turns: one never answered
+      ['Reply p95', R.reply_p95_ms != null ? ms(R.reply_p95_ms / 1000) : turns.length ? 'no reply' : '—', `${turns.length} turns${unanswered ? ` · ${unanswered} unanswered` : ''}`, ''],
       ['Agent tokens', compact(a.i + a.o), cached(a), 'var(--agent)'],
-      ['Tester tokens', compact(t.i + t.o), 'LiveTest: tester LLM', ''],
+      ['Tester tokens', compact(t.i + t.o), 'tester LLM · as reported by LiveKit', ''],
       ['Agent errors', errors, 'reported, not checked', errors ? 'var(--tester)' : ''],
     ];
-    return `<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:12px">
-        <h1 style="margin:0;font-size:26px;font-weight:600">Run <span class="mono" style="font-size:24px">${esc(run.id)}</span></h1>
-        <span class="muted">${esc(run.agent)} · profile ${esc(run.profile || 'none')} · ${esc(run.mode)} · ${when(run.started_at)}${lastEnd ? ' – ' + when(lastEnd) : ''}</span>
-        ${['running', 'stopping'].includes(run.status) ? '<span class="chip" style="background:var(--line);color:var(--sub)">still running: a snapshot</span>' : ''}
+    const failedScen = new Set(rs.filter(r => dot(r) === 'F').map(r => r.scenario.name));
+    return `<div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px">
+        <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:12px">
+          <h1 style="margin:0;font-size:26px;font-weight:600">Run <span class="mono" style="font-size:24px">${esc(run.id)}</span></h1>
+          <span class="muted">${esc(run.agent)} · profile ${esc(run.profile || 'none')} · ${esc(run.mode)} · ${when(run.started_at)}${lastEnd ? ' – ' + when(lastEnd) : ''}</span>
+          ${!LIVE.includes(run.status) ? '' : served ? '<span style="display:inline-flex;align-items:center;gap:6px;color:var(--live);font-weight:500;font-size:13px"><span class="livedot"></span>live</span>'
+            : '<span class="chip" style="background:var(--line);color:var(--sub)">still running: a snapshot</span>'}
+        </div>
+        ${served ? `<div style="display:flex;flex-wrap:wrap;gap:8px">${stopButton('run')}
+          ${failedScen.size ? `<a class="btn" href="${esc(again(failedScen))}">Re-run failed (${failedScen.size})</a>` : ''}
+          <a class="btn" href="${esc(again())}">Run again</a>
+          <a class="btn primary" href="/#report/${encodeURIComponent(run.id)}">Report</a></div>` : ''}
       </div>
       <div class="tiles">${tiles.map(([k, v, sub, c]) => `<div class="panel tile"><div class="muted" style="font-size:12px">${k}</div><b style="color:${c || 'var(--text)'}">${esc(v)}</b><div class="muted" style="font-size:12px">${esc(sub)}</div></div>`).join('')}</div>`;
   },
+  live() {  // served only: one tile per conversation in progress, its last three lines
+    const on = R.results.filter(r => LIVE.includes(r.status));
+    if (!served || !on.length) return '';
+    return `<div style="display:flex;align-items:center;gap:8px"><span class="livedot"></span><span style="font-weight:600">Live now</span>
+        <span class="muted small">· one tile per conversation in progress · click one to watch it</span></div>
+      <div class="lives">${on.map(r => {
+        const lines = r.x.convo.filter(l => !l.who.endsWith('heard')).slice(-3), turn = r.x.convo.filter(l => l.who === 'tester').length;
+        return `<button class="lt" onclick="openTest(${r.test})"><span style="display:flex;justify-content:space-between;gap:8px;font-size:14px"><b>#${r.test} ${esc(r.scenario.name)}</b><span class="mono muted">turn ${turn}</span></span>
+          ${lines.map((l, k) => `<span style="opacity:${k === lines.length - 1 ? 1 : .55}"><b style="color:var(--${l.who})">${l.who} </b>${esc(l.text.slice(0, 200))}</span>`).join('')
+            || '<span class="muted">waiting for the first words…</span>'}</button>`;
+      }).join('')}</div>`;
+  },
   problems() {
     const CHIP = {check: ['#3b1d0d', '#fdba74'], latency: ['#0e2a35', '#7dd3fc'], test: ['#3b1d0d', '#fdba74'], 'agent errors': ['#2a2a2d', '#c8c8ce']};
-    if (!R.problems.length) return '<h2 class="h2">Problems</h2><div class="muted">none: every graded test passed, and the agent reported no errors</div>';
-    return `<h2 class="h2">Problems</h2><div class="probs">${R.problems.map((p, i) => `<button class="prob${S.prob === p.key ? ' on' : ''}" onclick="problem(${i})">
+    if (!R.problems.length) return '<h2 class="h2">Failed checks and agent errors</h2><div class="muted">none</div>';
+    return `<div style="display:flex;align-items:baseline;gap:10px"><h2 class="h2">Failed checks and agent errors</h2><span class="muted small">grouped by check · click one to highlight its tests below</span></div>
+      <div class="probs">${R.problems.map((p, i) => `<button class="prob${S.prob === p.key ? ' on' : ''}" onclick="problem(${i})">
         <span style="display:flex;gap:8px;align-items:center"><span class="chip" style="background:${CHIP[p.kind][0]};color:${CHIP[p.kind][1]}">${esc(p.kind)}</span><span class="muted" style="font-size:12px">${p.tests.size} tests · ${esc([...p.scen].join(', '))}</span></span>
         <span>${esc(p.title.slice(0, 300))}</span></button>`).join('')}</div>`;
   },
   scenarios() {
     const rows = {}, prob = R.problems.find(p => p.key === S.prob);
-    R.results.forEach((r, i) => (rows[r.scenario.name] ??= []).push(i));
-    return `<div class="hd"><h2 class="h2">Scenarios and tests</h2><span class="muted small">click a dot to open that test below</span></div>` +
-      Object.entries(rows).map(([name, ix], n) => {
-        const graded = ix.map(i => R.results[i]).filter(r => r.passed !== null);
-        return `<div class="row"><span class="mono muted" style="width:26px">${n + 1}</span><span class="name">${esc(name)}</span><span class="dots">${ix.map((i, k) => {
-          const r = R.results[i], c = dot(r);
-          return `<button class="dot ${c}${i === S.sel ? ' sel' : ''}${prob && !prob.tests.has(r.test) ? ' dim' : ''}" onclick="pick(${i})" aria-label="test ${r.test}, ${esc(name)} attempt ${k + 1}: ${esc(outcome(r))}">${GLYPH[c]}</button>`;
+    R.results.forEach(r => (rows[r.scenario.name] ??= []).push(r));
+    return `<div class="hd"><h2 class="h2">Scenarios and tests</h2><span class="muted small">click a dot to open that test</span></div>` +
+      Object.entries(rows).map(([name, rs], n) => {
+        const graded = rs.filter(r => r.passed !== null);
+        return `<div class="row"><span class="mono muted" style="width:26px">${n + 1}</span><span class="name">${esc(name)}</span><span class="dots">${rs.map((r, k) => {
+          const c = dot(r);
+          return `<button class="dot ${c}${prob && !prob.tests.has(r.test) ? ' dim' : ''}" onclick="openTest(${r.test})" aria-label="test ${r.test}, ${esc(name)} attempt ${k + 1}: ${esc(outcome(r))}">${GLYPH[c]}</button>`;
         }).join('')}</span><span class="score">${graded.filter(r => r.passed === 1).length} / ${graded.length}</span></div>`;
       }).join('');
   },
-  test() {
-    const r = R.results[S.sel], x = r.x, same = R.results.filter(o => o.scenario.name === r.scenario.name), c = dot(r);
-    const [bg, fg, label] = {P: ['#0f2a1a', '#86efac', '✓ passed'], F: ['#3b1d0d', '#fdba74', `✗ ${outcome(r)}`], S: ['#2a2a2d', '#c8c8ce', `■ ${outcome(r)} · not graded`]}[c];
-    const failed = (r.checks || []).filter(k => !k.passed);
-    const why = failed.length ? failed.map(k => `${k.check}: expected ${json(k.expected)}; actual ${json(k.actual)}`) : c === 'F' ? [r.ended || r.status] : [];
-    const lat = r.scenario.expect?.find(e => e.type === 'latency'), limit = (lat?.p95_ms ?? lat?.p99_ms ?? 10000) / 1000;  // else the 10 s reply rule
-    const units = u => Object.entries(u).filter(([k]) => !['kind', 'provider', 'model'].includes(k))
-      .map(([k, v]) => `${k === 'audio_duration' ? v.toFixed(1) : num(v)} ${UNITS[k] || k}`).join(' · ');
-    const gaps = x.gaps.map(g => g.b - g.a), testP95 = p95(gaps);
-    const usage = [['reply p95', testP95 === null ? '—' : ms(testP95), testP95 > limit ? 'var(--tester)' : 'var(--okbar)'],
-      ...['agent', 'tester'].flatMap(side => (r.usage?.[side] || []).map(u => [`${side} ${u.kind}`, `${u.model} · ${units(u) || 'nothing reported'}`, '']))];
+
+  // ---- a test, the C board: the fixed top ----
+  thead() {
+    const r = cur(), same = R.results.filter(o => o.scenario.name === r.scenario.name), c = dot(r), live = LIVE.includes(r.status);
+    const [bg, fg, label] = live ? ['#0e2a35', '#7dd3fc', `● running · turn ${r.x.convo.filter(l => l.who === 'tester').length}`]
+      : {P: ['#0f2a1a', '#86efac', '✓ passed'], F: ['#3b1d0d', '#fdba74', `✗ ${outcome(r)}`],
+         S: ['#2a2a2d', '#c8c8ce', `■ ${outcome(r)} · not graded`], T: ['#2a2a2d', '#c8c8ce', 'queued'], R: ['#0e2a35', '#7dd3fc', 'running']}[c];
+    const back = served ? `/runs/${encodeURIComponent(R.run.id)}` : R.test ? '' : '#';
+    const file = `run-${R.run.id}_test-${r.test}_report.html`;
     return `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
-        <h2 class="h2" style="font-size:22px">Test #${r.test} · ${esc(r.scenario.name)}</h2>
-        <span class="muted">attempt ${same.indexOf(r) + 1} of ${same.length} · ended ${esc(r.ended || '—')}</span>
-        <span class="chip" style="background:${bg};color:${fg}">${esc(label)}</span>
+        ${back ? `<a class="tbtn" href="${back}">← Runs / ${esc(R.run.id)}</a>` : `<span class="tbtn" style="cursor:default">Run ${esc(R.run.id)}</span>`}
+        <span style="font-weight:600;font-size:18px">#${r.test} ${esc(r.scenario.name)}</span>
+        <span class="chip" style="padding:3px 10px;font-size:13px;background:${bg};color:${fg}">${esc(label)}</span>
+        <span style="flex:1"></span>
+        ${served && live ? `<button class="tbtn" onclick="stopRun(${r.test})" title="ends this conversation; what it recorded so far is kept">■ Stop this test</button>` : ''}
+        ${served ? `<button class="tbtn sm" onclick="copyLink(this, true)" title="a link that opens at the playhead (and the span in the Inspector)">Copy link</button>
+          <button class="tbtn on" onclick="S.rep = !S.rep; put('thead'); sizeOf()">Download test report</button>` : ''}
       </div>
-      ${why.length ? `<div class="why"><b>Why it failed</b>${why.map(w => `<div>${esc(w.slice(0, 600))}</div>`).join('')}</div>` : ''}
-      <div class="cols">
-        <div class="panel" style="flex:2 1 420px;min-width:0;display:flex;flex-direction:column;gap:10px">
-          <div style="font-weight:600">Conversation</div>
-          ${x.convo.map(l => `<div class="line"><span class="mono muted t">${at(l.ts - x.t0)}</span>
-            <span class="who" style="color:var(--${l.heard ? 'muted' : l.who})">${l.who}</span>
-            <span class="${l.heard ? 'muted' : l.who === 'tool' ? 'mono' : ''}"${l.error ? ' style="color:var(--bad)"' : ''}>${esc(l.text)}</span></div>`).join('') || '<div class="muted">nobody spoke</div>'}
-        </div>
-        <div class="side">
-          <div class="panel"><div style="font-weight:600;margin-bottom:6px">Checks</div>
-            ${r.checks ? r.checks.map(k => `<div class="kv"><span style="width:18px;flex-shrink:0;font-weight:700;color:var(--${k.passed ? 'ok' : 'bad'})">${k.passed ? '✓' : '✗'}</span>
-              <span style="display:flex;flex-direction:column;gap:2px;min-width:0"><span class="mono">${esc(k.check)} · ${esc(json(k.expected))}</span>
-              <span class="mono muted" style="font-size:12px">actual: ${esc(json(k.actual).slice(0, 600))}</span></span></div>`).join('')
-              : `<div class="muted">not checked: checks run only on tests that finish (${esc(r.status)})</div>`}
-          </div>
-          <div class="panel"><div style="font-weight:600;margin-bottom:6px">Usage</div>
-            ${usage.map(([k, v, c]) => `<div class="kv"><span class="muted k">${esc(k)}</span><span class="mono" style="color:${c || 'inherit'}">${esc(v)}</span></div>`).join('')}
-          </div>
-        </div>
+      <div class="facts">${[['Agent', R.run.agent], ['Attempt', `${same.indexOf(r) + 1} of ${same.length}`], ['Profile', r.profile?.name || 'none'],
+          ['Mode', R.run.mode], ['Started', when(r.started_at)], ['Length', at(r.x.D)], ['Ended', live ? 'still running' : (r.ended || r.status).replaceAll('_', ' ')],
+          ['Room', r.room, true]].map(([k, v, mono]) => `<div class="fact"><span>${k}</span><b class="${mono ? 'mono' : ''}" title="${esc(v)}">${esc(v)}</b></div>`).join('')}</div>
+      ${served && S.rep ? `<div class="panel" style="padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;gap:14px">
+        <div style="display:flex;flex-direction:column;gap:4px;flex:1 1 380px;min-width:0;overflow-wrap:anywhere">
+          <span>Just this test: everything on this page${r.audio ? ', with the recording' : ''} · <span class="mono">./${esc(file)}</span>${S.size ? ` · about ${S.size}` : ''}</span>
+          <code class="mono muted">$ livetest report create --run ${esc(R.run.id)} --test ${r.test}</code></div>
+        ${live ? '<button class="tbtn on" disabled>Available when the test ends</button>'
+          : `<a class="tbtn on" href="/api/runs/${encodeURIComponent(R.run.id)}/report?test=${r.test}" download>Download</a>`}</div>` : ''}`;
+  },
+  cards() {
+    // Reply gaps as checks.replies pairs them; Infinity: a turn never answered, ranked slowest as checks.rank does
+    const r = cur(), x = r.x, sd = sides(r), c = lay(r), all = (r.replies || []).map(g => g.gap ?? Infinity), gaps = all.filter(isFinite), limit = c.limit;
+    const ttft = x.replies.map(m => m.llm_node_ttft).filter(v => v != null), e2e = x.replies.map(m => m.e2e_latency).filter(v => v != null);
+    const ag = r.usage?.agent || [], te = r.usage?.tester || [], voice = R.run.mode === 'voice';
+    const sum = (us, kind, k) => us.filter(u => u.kind === kind).reduce((n, u) => n + (u[k] || 0), 0), live = !r.usage;
+    const tin = sum(ag, 'llm', 'input_tokens'), cached = sum(ag, 'llm', 'input_cached_tokens'), terr = x.tools.filter(t => t.error).length;
+    const card = (k, v, s, color, small) => `<div class="panel card"><span class="k">${k}</span><span class="v mono${small ? ' sm' : ''}"${color ? ` style="color:${color}"` : ''}>${esc(v)}</span><span class="s">${esc(s)}</span></div>`;
+    const q95 = p95(all), lat = r.checks?.find(k => k.check === 'latency');
+    return `<div class="cards">
+        ${card('TURNS', `${sd.tester.length} / ${sd.agent.length}`, 'tester / agent')}
+        ${card('REPLY GAP P50', ms(rankAt(all, 0.5)), `${gaps.length} replies${all.length > gaps.length ? ` · ${all.length - gaps.length} unanswered` : ''}`)}
+        ${card('REPLY GAP P95', ms(q95), lat ? `latency check ${lat.passed ? 'passed' : 'failed'} · limit ${ms(limit)}` : 'no limit set', !lat ? '' : lat.passed ? 'var(--okbar)' : 'var(--tester)')}
+        ${card('REPLY GAP MIN – MAX', gaps.length ? `${num(Math.min(...gaps) * 1000)} – ${ms(Math.max(...gaps))}` : '—', voice ? 'tester stops → hears the agent' : 'line sent → agent replying')}
+        ${card('LLM FIRST TOKEN P50', ms(rankAt(ttft, 0.5)), `agent llm_node · p95 ${ms(p95(ttft))}`)}
+        ${voice ? card('END TO END P50', ms(rankAt(e2e, 0.5)), 'agent e2e_latency') : ''}
+        ${card('TOOL CALLS', x.tools.length, `${terr} error${terr === 1 ? '' : 's'}`, terr ? 'var(--bad)' : '')}
+        ${card('AGENT ERRORS', x.errors.length, 'reported, not checked', x.errors.length ? 'var(--tester)' : '')}
+        ${card('AGENT LLM TOKENS', live ? '—' : `${compact(tin)} / ${compact(sum(ag, 'llm', 'output_tokens'))}`, live ? 'when the test ends' : `in / out · ${tin ? Math.round(cached / tin * 100) : 0}% cached · as reported by LiveKit`)}
+        ${voice ? card('AGENT STT / TTS', live ? '—' : `${sum(ag, 'stt', 'audio_duration').toFixed(1)} s / ${num(sum(ag, 'tts', 'characters_count'))} ch`, 'audio in / characters out') : ''}
+        ${card('TESTER TOKENS', live ? '—' : `${compact(sum(te, 'llm', 'input_tokens'))} / ${compact(sum(te, 'llm', 'output_tokens'))}`, 'in / out · as reported by LiveKit')}
+        ${card('MODELS', ag.map(u => `${u.kind} ${u.model}`).join(' · ') || '—', `tester: ${te.map(u => `${u.kind} ${u.model}`).join(' · ') || '—'}`, '', true)}
+      </div>
+      <div class="checks"><span class="muted small" style="font-weight:600;margin-right:4px">Checks</span>
+        ${!r.checks ? `<span class="muted small">not checked: checks run only on tests that finish (${esc(r.status)})</span>`
+          : !r.checks.length ? '<span class="muted small">none: this scenario sets no checks</span>'
+          : r.checks.map((k, i) => `<button class="cchip" onclick="pick('check', ${i})" title="${esc(`expected ${json(k.expected)} · actual ${json(k.actual)}`)}">
+          <b style="color:var(--${k.passed ? 'ok' : 'bad'})">${k.passed ? '✓' : '✗'}</b>${esc(k.check)}</button>`).join('')}
+        ${c.probs.length ? `<span class="muted small" style="margin-left:8px">${c.probs.length} failed check${c.probs.length === 1 ? '' : 's'} or error${c.probs.length === 1 ? '' : 's'} · marked in red on the player</span>` : ''}
       </div>`;
   },
-  // LiveKit's own span tree (what Grafana shows from the agent's OTel), rebuilt from outside: agent_session →
-  // user_speaking (+ stt, eou_detection) and agent_turn (llm_node, function_tool, tts_node, agent_speaking, errors).
-  // llm_node / tts_node are only as long as their first token / first audio: the session host reports no more.
-  traces() {
-    const r = R.results[S.sel], x = r.x, agentTime = s => s && clock(s) + x.offset;
-    const model = kind => (r.usage?.agent || []).find(u => u.kind === kind)?.model;
-    const kids = new Map(x.turns.map(t => [t, []])), top = x.turns.map(t => [['agent_turn', t.a, t.b, 'span'], kids.get(t)]);
-    const turnOf = ts => x.turns.findLast(t => t.a <= ts + 0.01);
-    const under = (ts, row) => { const t = turnOf(ts); t ? kids.get(t).push(row) : top.push([row, []]); };
-    for (const h of x.heard) {
-      const a = agentTime(h.started_speaking_at), b = agentTime(h.stopped_speaking_at);
-      if (a && b) top.push([[`user_speaking · ${h.text}`, a, b, 'tester'], [['stt', b, b + h.transcription_delay, 'sub'],
-        ['eou_detection', b, b + h.end_of_turn_delay, 'sub']].filter(k => !isNaN(k[2]))]);
-    }
-    for (const m of x.replies) {
-      const t = turnOf(m.ts), ttft = m.llm_node_ttft ?? 0;
-      if (t && m.llm_node_ttft != null) kids.get(t).push([`llm_node${model('llm') ? ` · ${model('llm')}` : ''}`, t.a, t.a + ttft, 'agent', `ttft ${ms(ttft)}`]);
-      if (t && m.tts_node_ttfb != null) kids.get(t).push([`tts_node${model('tts') ? ` · ${model('tts')}` : ''}`, t.a + ttft, t.a + ttft + m.tts_node_ttfb, 'tool', `ttfb ${ms(m.tts_node_ttfb)}`]);
-    }
-    for (const t of x.tools) under(t.ts, [`function_tool ${t.name} ${t.args}`, t.ts, t.ts + t.took, t.error ? 'bad' : 'okbar']);
-    for (const s of x.speaking) under(s.a, ['agent_speaking', s.a, s.b, 'agent']);
-    for (const e of x.errors) under(e.ts, [`error · ${e.msg}`, e.ts, e.ts, 'bad', '']);
-    const byStart = (p, q) => p[1] - q[1];
-    const rows = [[[`agent_session · test #${r.test}`, x.t0, x.t0 + x.D, 'span'], 0],
-      ...top.sort((p, q) => byStart(p[0], q[0])).flatMap(([row, k]) => [[row, 1], ...k.sort(byStart).map(c => [c, 2])])];
-    // The recording plays along the traces: a playhead runs down the tracks, and a click on any track seeks there.
-    const audio = r.audio ? `<button class="play" id="play" onclick="play()" aria-label="Play or pause the recording">${ICON.play}</button>
-        <span class="mono" style="font-size:13px"><span id="clock">0:00</span> / ${at(x.D)}</span>
-        <span class="muted small">Recording embedded in this file · stereo: agent left, tester right · click a track to jump there</span>
-        <audio id="audio" preload="metadata" src="${esc(r.audio)}"></audio>`
-      : `<span class="muted small">${r.recording ? `Recording missing: ${esc(r.recording)} is gone` : R.run.mode === 'voice' ? 'Not recorded (--no-recordings)' : 'Text mode: no audio'}</span>`;
-    return `<h2 class="h2">Traces <span class="muted" style="font-size:13px;font-weight:400">· test #${r.test} · as LiveKit traces it</span></h2>
-      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px">${audio}</div>
-      <div class="rows${r.audio ? ' playable' : ''}">${rows.map(([[name, a, b, c, dur], lvl]) => `<div class="span">
-        <span class="mono name" style="padding-left:${lvl * 16}px" title="${esc(name)}">${esc(name)}</span>
-        <span class="track" onclick="seek(event)"><span style="left:${(a - x.t0) / x.D * 100}%;width:${(b - a) / x.D * 100}%;background:var(--${c})"></span></span>
-        <span class="mono muted dur">${esc(dur ?? ms(b - a))}</span></div>`).join('')}
-        ${r.audio ? '<div class="head" id="head" aria-hidden="true"></div>' : ''}</div>`;
-  },
-  logs() {
-    const r = R.results[S.sel], shown = r.x.logs.filter(l => rank(l.lvl) >= rank(S.lvl));
-    const color = l => rank(l) >= 2 ? 'var(--tester)' : l === 'DEBUG' ? 'var(--muted)' : 'var(--agent)';
-    const time = ts => new Date(ts * 1000).toTimeString().slice(0, 8) + '.' + String(Math.floor(ts * 1000) % 1000).padStart(3, '0');
+  bar() {
+    const r = cur(), x = r.x, t0 = x.t0, D = x.D, sd = sides(r), live = LIVE.includes(r.status), playing = r.audio ? !$('audio').paused : S.playing;
+    const L = v => Math.max(0, Math.min(100, v / D * 100));
+    const band = (list, colors) => list.map(s => `<span style="left:${L(s.a - t0)}%;width:${L(s.b - s.a)}%;background:var(--${colors[s.name] || 'bar'})" title="${esc(`${s.name} · ${at3(s.a - t0)} · ${ms(s.b - s.a)}`)}"></span>`).join('');
+    // The tester's states: recorded (voice), or its thinking from the trace (text).
+    const tstates = x.tstates.length ? x.tstates : sd.tester.flatMap(t => t.kids.filter(k => k.c === 'tthink').map(k => ({name: 'thinking', a: k.a, b: k.b})));
+    const rec = r.audio ? 'Recording · stereo: agent left, tester right'
+      : live ? 'live: everything but the recording streams now; the recording arrives when the test ends'
+      : r.recording ? (R.recordings === false ? 'Recording left out of this file (--no-recordings)' : `Recording missing: ${esc(r.recording)} is gone`)
+      : R.run.mode === 'voice' ? 'Not recorded (--no-recordings)' : 'Text mode: no audio · Play replays the timeline at its own pace';
     return `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
-        <h2 class="h2" style="margin-right:8px">Logs <span class="muted" style="font-size:13px;font-weight:400">· test #${r.test}</span></h2>
-        ${LEVELS.map(l => `<button class="lvl${S.lvl === l ? ' on' : ''}" onclick="level('${l}')">${l.toLowerCase()}</button>`).join('')}
+        <button class="tbtn on" id="play" style="min-width:84px" onclick="play()"${live ? ' disabled' : ''} title="Space">${playing ? ICON.pause + 'Pause' : ICON.play + 'Play'}</button>
+        <span class="mono" style="font-size:14px"><span id="clock">${at(S.t)}</span> / ${at(D)}</span>
+        <span class="muted small">${rec}</span>
+        <span style="flex:1"></span>
+        ${[1, 1.5, 2].map(v => `<button class="tbtn sm${S.speed === v ? ' on' : ''}" onclick="speed(${v})">${v}×</button>`).join('')}
+        <span class="muted small" title="keyboard"><kbd>Space</kbd> play · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>K</kbd> turns · <kbd>/</kbd> search · <kbd>Esc</kbd></span>
       </div>
-      <div class="mono logs">${shown.map(l => `<div><span class="muted">${time(l.ts)}</span> <span style="color:${color(l.lvl)}">${l.lvl.padEnd(7).replaceAll(' ', '&nbsp;')}</span> ${esc(l.msg)}</div>`).join('') || '<div class="muted">no log lines at this level</div>'}</div>`;
+      <div class="bands">
+        <div class="band"><span style="color:var(--agent)">AGENT</span><div class="bt" onclick="seekAt(event)">${band(x.states, STATE.agent)}</div></div>
+        <div class="band"><span style="color:var(--tester)">TESTER</span><div class="bt" onclick="seekAt(event)">${band(tstates, STATE.tester)}</div></div>
+        <div class="band"><span style="color:var(--bad)">FAILED</span><div class="bt marks" onclick="seekAt(event)">${lay(r).probs.map((p, i) =>
+          `<span style="left:calc(${L(p.ts - t0)}% - 1px);background:var(--bad)" title="${esc(`${p.kind} · ${p.label}`)}" onclick="event.stopPropagation();pick('problem', ${i})"></span>`).join('')}</div></div>
+        <div class="bph" aria-hidden="true"></div>
+      </div>
+      <div class="legend"><span><i style="background:var(--agent)"></i>agent speaking</span><span><i style="background:var(--athink)"></i>agent thinking</span>
+        <span><i style="background:var(--tester)"></i>tester speaking</span><span><i style="background:var(--tthink)"></i>tester thinking (its LLM)</span>
+        <span><i style="background:var(--listen)"></i>listening</span><span><i style="background:var(--bad)"></i>failed check or agent error</span></div>`;
   },
-  agent() {
-    const r = R.results[S.sel], i = r.x.info, a = i.agent_info || {}, f = i.framework || {}, seen = i.seen, p = r.profile || {};
-    const info = [['SDK', f.sdk ? `${f.sdk} · ${f.sdk_version}` : '—'], ['System prompt', a.instructions != null ? `${num(a.instructions.length)} characters` : '—'],
-                  ['Tools', (a.tools || []).join(', ') || 'none'], ...Object.entries(i.session_state?.options || {})];
-    const parse = v => { try { return typeof v === 'string' && v ? JSON.parse(v) : v; } catch { return v; } };
-    const empty = v => v == null || v === '' || (typeof v === 'object' && !Object.keys(v).length);
-    const same = (want, got) => empty(want) ? empty(got) : typeof want === 'object'
-      ? Object.entries(want).every(([k, v]) => JSON.stringify(parse(got)?.[k]) === JSON.stringify(v)) : String(want) === String(got);
-    const sent = [['room.metadata', p.room?.metadata, seen?.room_metadata], ['participant.metadata', p.participant?.metadata, seen?.metadata],
-                  ['participant.attributes', p.participant?.attributes, seen?.attributes], ['job.metadata', p.dispatch?.metadata]];
-    return `<h2 class="h2">What the agent showed</h2>
-      <div class="agent">
-        <div>${info.map(([k, v]) => `<div class="kv"><span class="muted k">${esc(k)}</span><span class="mono">${esc(v)}</span></div>`).join('')}</div>
-        <div><div class="label">${r.profile ? `PROFILE SENT (${esc(r.profile.name)}) · CONFIRMED BY THE SERVER` : 'NO PROFILE · WHAT THE ROOM HAD'}</div>
-          ${sent.map(([k, want, got]) => { const check = seen && got !== undefined, ok = check && same(want, got);
-            return `<div class="kv"><span class="mono muted" style="width:170px;flex-shrink:0">${k}</span><span class="mono" style="flex:1">${esc(json((check ? got : want) ?? '') || '—')}</span>
-              <span style="color:var(--${ok ? 'ok' : 'bad'})" title="${check && !ok ? esc('asked for ' + json(want ?? '')) : ''}">${check ? (ok ? '✓' : '✗') : ''}</span></div>`; }).join('')}
-        </div>
-      </div>
-      ${a.instructions != null ? `<details><summary class="seg">System prompt</summary><pre class="mono">${esc(a.instructions)}</pre></details>` : ''}`;
+  tabs() {
+    const r = cur(), counts = {traces: spans(r).length - 1, turns: exchanges(r).length, transcript: lay(r).turns.length, events: events(r).length,
+                               usage: (r.usage?.agent?.length || 0) + (r.usage?.tester?.length || 0), agent: chatItems(r).length, logs: r.x.logs.length};
+    return Object.entries(TABS).map(([k, t]) => `<button class="tab${S.tab === k ? ' on' : ''}" onclick="tab('${k}')" aria-pressed="${S.tab === k}">${t.title}<span class="n">${counts[k]}</span></button>`).join('');
+  },
+  tools: () => TABS[S.tab].tools?.() || '',
+  body: () => TABS[S.tab].body(),
+  inspector() {
+    const r = cur(), us = lay(r).turns.filter(u => u.who !== 'tool');
+    const it = S.insp || (us[Math.max(0, S.cur)] && inspect.turn(r, us[Math.max(0, S.cur)]));
+    if (!it) return '<span class="muted">Nothing to inspect yet.</span>';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span class="muted" style="font-size:11px;font-weight:600;letter-spacing:.05em">INSPECTOR · ${esc(it.kind.toUpperCase())}${S.insp ? '' : ' · FOLLOWING PLAYBACK'}</span>
+        <span style="display:flex;gap:6px">${S.insp ? '<button class="tbtn sm" onclick="S.insp = null; put(\'inspector\')" title="Esc">Follow playback</button>' : ''}<button class="tbtn sm" onclick="copyJson(this)">Copy as JSON</button></span></div>
+      <div style="font-size:17px;font-weight:600;overflow-wrap:anywhere">${esc(it.title)}</div>
+      <div>${it.rows.map(([k, v, c]) => `<div class="irow"><span class="k">${esc(k)}</span><span class="mono v"${c ? ` style="color:${c}"` : ''}>${esc(v)}</span></div>`).join('')}</div>
+      ${it.raw ? `<details open><summary class="muted small">Raw event</summary><pre class="mono">${esc(JSON.stringify(it.raw, null, 2))}</pre></details>` : ''}`;
   },
 };
 
-function put(...names) { for (const n of names) $(n).innerHTML = sections[n](); }
+// ---- a test: the tabs ----
 
-function pick(i) {
-  S.sel = i;
-  put('test', 'traces', 'logs', 'agent', ...(R.test ? [] : ['scenarios']));
-  hookAudio();
-  $('test').scrollIntoView({behavior: 'smooth'});
-}
+const TABS = {
+  traces: {
+    title: 'Traces',
+    tools() {
+      const kinds = [...new Set(spans(cur()).map(s => s.kind).filter(k => SPAN[k]))];
+      return `<input id="q" class="q" type="search" placeholder="Search spans  ( / )" value="${esc(S.q)}" oninput="S.q = this.value; put('body')" style="flex:1 1 200px;max-width:320px">
+        ${kinds.map(k => `<button class="fchip${S.hide.has(k) ? '' : ' on'}" aria-pressed="${!S.hide.has(k)}" onclick="toggle(S.hide, '${k}'); put('tools', 'body')"><i style="background:var(--${SPAN[k][0]})"></i>${SPAN[k][1]}</button>`).join('')}
+        <span style="flex:1"></span>
+        <button class="tbtn sm" onclick="S.closed.clear(); put('body')">Expand all</button>
+        <button class="tbtn sm" onclick="spans(cur()).forEach((s, i) => s.lvl === 1 && S.closed.add(i)); put('body')">Collapse all</button>`;
+    },
+    body() {
+      const r = cur(), x = r.x, all = spans(r), q = S.q.trim().toLowerCase(), filtered = q || S.hide.size;
+      let shut = Infinity;  // rows under a collapsed one are hidden
+      const rows = all.map((s, i) => {
+        if (s.lvl <= shut) shut = Infinity;
+        const hidden = filtered ? s.lvl > 0 && (S.hide.has(s.kind) || (q && !s.name.toLowerCase().includes(q))) : s.lvl > shut;
+        if (!filtered && !hidden && S.closed.has(i)) shut = s.lvl;
+        if (hidden) return '';
+        const kids = all[i + 1]?.lvl > s.lvl;
+        return `<div class="span${s.lvl === 1 ? ' lead' : ''}">
+          <span class="nm" style="padding-left:${s.lvl * 14}px">${kids && !filtered ? `<button class="caret" onclick="toggle(S.closed, ${i}); put('body')" aria-label="${S.closed.has(i) ? 'expand' : 'collapse'}">${S.closed.has(i) ? '+' : '−'}</button>` : '<span class="caret"></span>'}
+            <button class="mono name" title="${esc(s.name)}" onclick="pick('span', ${i})"${s.lvl === 1 ? ` style="color:var(--${s.kind === 'tester' ? 'tester' : 'agent'})"` : ''}>${esc(s.name)}</button></span>
+          <span class="track" onclick="seekAt(event)"><span style="left:${(s.a - x.t0) / x.D * 100}%;width:${(s.b - s.a) / x.D * 100}%;background:var(--${s.c})"></span></span>
+          <span class="mono muted dur">${esc(s.dur || ms(s.b - s.a))}</span></div>`;
+      }).join('');
+      return `<div class="rows">${rows || '<div class="muted">no spans match</div>'}<div class="phd" aria-hidden="true"></div></div>`;
+    },
+  },
+  turns: {
+    title: 'Turns',
+    body() {
+      const r = cur(), [k, d] = S.sort, rows = exchanges(r).map((e, i) => [e, i]);
+      const cols = [['n', '#'], ['said', 'Tester said'], ['heard', 'Agent heard'], ['gap', 'Reply gap'], ['ttft', 'LLM first token'], ['ttfb', 'TTS first byte'],
+                    ['e2e', 'End to end'], ['stt', 'STT'], ['eou', 'End of turn'], ['tools', 'Tools'], ['reply', 'Agent replied']]
+        .filter(([c]) => R.run.mode === 'voice' || !['ttfb', 'e2e', 'stt', 'eou'].includes(c));
+      const val = e => k === 'tools' ? e.tools.length : e[k] ?? -1;
+      rows.sort(([p], [q]) => (val(p) > val(q) ? 1 : val(p) < val(q) ? -1 : 0) * d);
+      const limit = lay(r).limit, cell = (e, c) => ['gap', 'ttft', 'ttfb', 'e2e', 'stt', 'eou'].includes(c)
+        ? `<td class="n"${c === 'gap' && limit && e.gap > limit ? ' style="color:var(--tester)"' : ''}>${ms(e[c])}</td>`
+        : c === 'n' ? `<td class="n">${e.n || '—'}</td>` : c === 'tools' ? `<td class="mono">${esc(e.tools.join(', '))}</td>`
+        : `<td${c === 'heard' ? ' class="muted"' : ''} style="min-width:160px"><span class="clip">${esc(String(e[c]).slice(0, 400))}</span></td>`;
+      return `<div class="tw"><table class="t"><thead><tr>${cols.map(([c, t]) => `<th><button onclick="S.sort = ['${c}', S.sort[0] === '${c}' ? -S.sort[1] : 1]; put('body')">${t}${k === c ? (d > 0 ? ' ▲' : ' ▼') : ''}</button></th>`).join('')}</tr></thead>
+        <tbody>${rows.map(([e, i]) => `<tr class="click" data-a="${e.a}" onclick="pick('row', ${i})">${cols.map(([c]) => cell(e, c)).join('')}</tr>`).join('')}</tbody></table></div>
+        ${rows.length ? '' : '<div class="muted">nobody spoke</div>'}
+        <div class="muted small" style="margin-top:8px">Reply gap, on the tester's clock: ${R.run.mode === 'voice' ? 'the tester stops speaking → it hears the agent start' : 'the tester sends its line → the agent starts its reply'}${lay(r).limit ? ` (the scenario's limit: ${ms(lay(r).limit)})` : ''}; a test ends and fails if the agent doesn't start within 10 s (no_reply). The other timings are the agent's own, as LiveKit reports them. Click a column to sort, a row to jump there.</div>`;
+    },
+  },
+  transcript: {
+    title: 'Transcript',
+    body() {
+      const r = cur(), t0 = r.x.t0, us = lay(r).turns, sd = sides(r);
+      let k = -1;
+      return `${us.map((u, i) => {
+        if (u.who === 'tester') k++;
+        const hearing = u.who === 'tester' ? (sd.tester[k]?.kids || []).filter(s => s.name.startsWith('agent · transcript') || s.name.startsWith('agent · eot_prediction')) : [];
+        return `<button class="trow" data-a="${u.a - t0}" onclick="pick('turn', ${i})">
+          <span class="mono muted" style="width:44px;flex-shrink:0;padding-top:3px">${at(u.a - t0)}</span>
+          <span style="width:52px;flex-shrink:0;font-weight:600;color:var(--${u.who === 'tool' ? 'agent' : u.who})">${u.who === 'tool' ? 'agent' : u.who}</span>
+          <span class="say">${u.who === 'tool' ? '<span class="muted small">tool call</span>' : ''}<span class="${u.who === 'tool' ? 'mono' : ''}"${u.error ? ' style="color:var(--bad)"' : ''}>${esc(u.text)}</span>
+            ${u.cut ? `<span style="font-size:13px;color:var(--bad)">interrupted after ${ms(u.b - u.a)} of speaking: this text may hold more than was spoken</span>` : ''}
+            ${u.heard != null ? `<span class="muted" style="font-size:13px">heard by ${u.who === 'tester' ? 'agent' : 'tester'}: “${esc(u.heard)}”</span>` : ''}
+            ${hearing.map(s => `<span class="muted mono" style="font-size:11px">${esc(s.name)}</span>`).join('')}</span></button>`;
+      }).join('') || '<div class="muted" style="padding:0 10px">nobody spoke</div>'}
+        <div class="muted small" style="margin-top:8px">The turn being spoken lights up; click a turn to jump there.</div>`;
+    },
+  },
+  events: {
+    title: 'Events',
+    tools() {
+      const types = {};
+      for (const e of events(cur())) types[`${e[1]} · ${e[2]}`] = (types[`${e[1]} · ${e[2]}`] || 0) + 1;
+      return `<select class="q" onchange="S.evType = this.value; put('body')" aria-label="Event type"><option value="">every type</option>${Object.entries(types).sort().map(([t, n]) =>
+          `<option value="${esc(t)}"${S.evType === t ? ' selected' : ''}>${esc(t)} (${n})</option>`).join('')}</select>
+        <input class="q" type="search" placeholder="Search events" value="${esc(S.evQ)}" oninput="S.evQ = this.value; put('body')" style="flex:1 1 200px;max-width:320px">`;
+    },
+    body() {
+      const r = cur(), t0 = r.x.t0, q = S.evQ.trim().toLowerCase(), all = events(r);
+      const rows = all.map((e, i) => [e, i]).filter(([e]) => (!S.evType || `${e[1]} · ${e[2]}` === S.evType) && (!q || JSON.stringify(e).toLowerCase().includes(q)));
+      return `<div class="tw"><table class="t"><thead><tr><th>At</th><th>Source</th><th>Type</th><th>Data</th></tr></thead><tbody>${rows.slice(0, 1000).map(([e, i]) =>
+          `<tr class="click" data-a="${e[0] - t0}" onclick="pick('event', ${i})"><td class="n">${at3(e[0] - t0)}</td><td style="color:var(--${e[1] === 'tester' ? 'tester' : 'agent'})">${esc(e[1])}</td>
+            <td class="mono" style="white-space:nowrap">${esc(e[2])}</td><td class="mono muted">${esc(JSON.stringify(e[3][e[2]] ?? e[3]).slice(0, 160))}</td></tr>`).join('')}</tbody></table></div>
+        <div class="muted small" style="margin-top:8px">${rows.length} of ${all.length} events${rows.length > 1000 ? ' (first 1,000 shown)' : ''}: everything the agent's session host sent and what the tester did, as recorded. Click one for its raw JSON.</div>`;
+    },
+  },
+  usage: {
+    title: 'Usage',
+    body() {
+      const r = cur();
+      const table = side => (r.usage?.[side] || []).map(u => `<tr><td style="color:var(--${side});white-space:nowrap">${side}</td><td class="mono">${esc(u.kind)}</td><td>${esc(u.provider || '—')}</td><td class="mono">${esc(u.model)}</td>
+          <td class="mono">${esc(Object.entries(u).filter(([k]) => !['kind', 'provider', 'model'].includes(k)).map(([k, v]) => `${k} ${typeof v === 'number' ? (Number.isInteger(v) ? num(v) : v.toFixed(2)) : v}`).join(' · '))}</td></tr>`).join('');
+      return `<div class="label" style="margin-top:0">PER MODEL · WHEN THE TEST ENDED · AS REPORTED BY LIVEKIT</div>
+        ${r.usage ? `<div class="tw"><table class="t"><thead><tr><th>Side</th><th>Kind</th><th>Provider</th><th>Model</th><th>Counts</th></tr></thead><tbody>${table('agent')}${table('tester')}</tbody></table></div>`
+          : '<div class="muted">arrives when the test ends</div>'}
+        <div class="muted small" style="margin-top:8px">LiveKit counts 0 tokens for an LLM call cut off by an interruption, so with interruptions the real use is higher.</div>`;
+    },
+  },
+  agent: {
+    title: 'Agent',
+    body() {
+      const r = cur(), i = r.x.info, a = i.agent_info || {}, f = i.framework || {}, seen = i.seen, p = r.profile || {}, st = i.session_state || {};
+      const info = [['SDK', f.sdk ? `${f.sdk} · ${f.sdk_version}` : '—'], ['Agent id', st.agent_id || a.id || '—'], ['States at join', `agent ${name(st.agent_state) || '—'} · user ${name(st.user_state) || '—'}`],
+                    ['System prompt', a.instructions != null ? `${num(a.instructions.length)} characters` : '—'], ['Tools', (a.tools || []).join(', ') || 'none'],
+                    ...Object.entries(st.options || {})];
+      const parse = v => { try { return typeof v === 'string' && v ? JSON.parse(v) : v; } catch { return v; } };
+      const empty = v => v == null || v === '' || (typeof v === 'object' && !Object.keys(v).length);
+      const same = (want, got) => empty(want) ? empty(got) : typeof want === 'object'
+        ? Object.entries(want).every(([k, v]) => JSON.stringify(parse(got)?.[k]) === JSON.stringify(v)) : String(want) === String(got);
+      const sent = [['room.metadata', p.room?.metadata, seen?.room_metadata], ['participant.metadata', p.participant?.metadata, seen?.metadata],
+                    ['participant.attributes', p.participant?.attributes, seen?.attributes], ['job.metadata', p.dispatch?.metadata]];
+      const items = chatItems(r);
+      return `<div class="agent">
+          <div><div class="label" style="margin-top:0">THE AGENT</div>${info.map(([k, v]) => `<div class="kv"><span class="muted k">${esc(k)}</span><span class="mono">${esc(v)}</span></div>`).join('')}</div>
+          <div><div class="label" style="margin-top:0">${r.profile ? `PROFILE SENT (${esc(r.profile.name)}) · CONFIRMED BY THE SERVER` : 'NO PROFILE · WHAT THE ROOM HAD'}</div>
+            ${sent.map(([k, want, got]) => { const check = seen && got !== undefined, ok = check && same(want, got);
+              return `<div class="kv"><span class="mono muted" style="width:180px;flex-shrink:0">${k}</span><span class="mono" style="flex:1">${esc(json((check ? got : want) ?? '') || '—')}</span>
+                <span style="color:var(--${ok ? 'ok' : 'bad'})" title="${check && !ok ? esc('asked for ' + json(want ?? '')) : ''}">${check ? (ok ? '✓' : '✗') : ''}</span></div>`; }).join('')}
+            <div class="label">THE AGENT'S PARTICIPANT ATTRIBUTES</div>
+            ${Object.entries(seen?.agent_attributes || {}).map(([k, v]) => `<div class="kv"><span class="mono muted" style="width:180px;flex-shrink:0">${esc(k)}</span><span class="mono">${esc(v)}</span></div>`).join('') || '<div class="muted small">none seen</div>'}
+          </div>
+        </div>
+        ${a.instructions != null ? `<details><summary class="seg">System prompt</summary><pre class="mono">${esc(a.instructions)}</pre></details>` : ''}
+        <div class="label">CHAT CONTEXT AT JOIN, THEN THE WHOLE HISTORY · ${items.length} items</div>
+        <div class="tw"><table class="t"><tbody>${items.map((it, k) => `<tr class="click" onclick="pick('item', ${k})"><td class="muted" style="white-space:nowrap">${esc(it.from)}</td>
+          <td class="mono" style="white-space:nowrap">${esc(it.kind)}</td><td>${esc(it.label.slice(0, 400))}</td></tr>`).join('')}</tbody></table></div>`;
+    },
+  },
+  logs: {
+    title: 'Logs',
+    tools: () => `${LEVELS.map(l => `<button class="lvl${S.lvls.has(l) ? ' on' : ''}" aria-pressed="${S.lvls.has(l)}" onclick="level('${l}')">${l.toLowerCase()}</button>`).join('')}
+      ${S.lvls.has('DEBUG') && !cur().x.logs.some(l => l.lvl === 'DEBUG') ? '<span class="muted small">no debug lines recorded: start the run with -v</span>' : ''}`,
+    body() {
+      // Exactly the levels toggled on (run logs --level is a minimum instead, the logging convention for scripts).
+      const r = cur(), shown = r.x.logs.filter(l => S.lvls.has(kind(l.lvl)));
+      const color = l => rank(l) >= 2 ? 'var(--tester)' : l === 'DEBUG' ? 'var(--muted)' : 'var(--agent)';
+      return `<div class="mono logs">${shown.map(l => `<div data-a="${l.ts - r.x.t0}"><span class="muted">${at3(l.ts - r.x.t0)}</span> <span style="color:${color(l.lvl)}">${l.lvl.padEnd(7).replaceAll(' ', '&nbsp;')}</span> ${esc(l.msg)}</div>`).join('')
+        || '<div class="muted">no log lines at the levels chosen</div>'}</div>`;
+    },
+  },
+};
+
+// Only a section whose HTML changed is redrawn, so a live refetch keeps a <details> open and a search box focused.
+const drawn = {};
+function put(...names) { for (const n of names) { const h = sections[n](); if (drawn[n] !== h) $(n).innerHTML = drawn[n] = h; } }
+const TEST = ['thead', 'cards', 'bar', 'tabs', 'tools', 'body', 'inspector'];
+const toggle = (set, v) => set.has(v) ? set.delete(v) : set.add(v);
+
 function problem(i) { const k = R.problems[i].key; S.prob = S.prob === k ? null : k; put('problems', 'scenarios'); }
-function level(l) { S.lvl = l; put('logs'); }
-function play() { const a = $('audio'); a.paused ? a.play() : a.pause(); }
-function seek(ev) {  // a click on a trace track plays from there
-  const a = $('audio'), box = ev.currentTarget.getBoundingClientRect();
-  if (a) a.currentTime = (ev.clientX - box.left) / box.width * R.results[S.sel].x.D;
+function level(l) { toggle(S.lvls, l); put('tools', 'body'); }
+function tab(k) { S.tab = k; put('tabs', 'tools', 'body'); tick(); }
+function openTest(n) {  // the app: its own page; the file: #tests/<n>
+  if (served) location.href = `/runs/${encodeURIComponent(R.run.id)}/tests/${n}`;
+  else location.hash = `tests/${n}`;
 }
-function hookAudio() {
-  const a = $('audio'), x = R.results[S.sel].x;
-  if (!a) return;
-  a.ontimeupdate = () => { $('clock').textContent = at(a.currentTime); $('head').style.setProperty('--p', Math.min(1, a.currentTime / x.D)); };
-  a.onplay = a.onpause = () => { $('play').innerHTML = a.paused ? ICON.play : ICON.pause; };
+
+// ---- playback ----
+
+function pick(kind, i) {  // into the Inspector; anything with a time also moves the playhead there
+  const r = cur();
+  S.insp = {...inspect[kind](r, things(r)[kind][i]), ref: [kind, i]};
+  put('inspector');
+  if (S.insp.at != null) seekTo(S.insp.at);
+}
+function seekTo(t) {
+  const r = cur(), a = $('audio');
+  S.t = Math.max(0, Math.min(t, r.x.D));
+  if (a.getAttribute('src')) a.currentTime = S.t;
+  tick();
+}
+function seekAt(ev) { const box = ev.currentTarget.getBoundingClientRect(); seekTo((ev.clientX - box.left) / box.width * cur().x.D); }
+function play() {
+  const a = $('audio');
+  if (a.getAttribute('src')) a.paused ? a.play() : a.pause();
+  else { S.playing = !S.playing; if (S.playing && S.t >= cur().x.D) S.t = 0; }
+  S.insp = null;  // follow the turn being spoken
+  tick();
+}
+function speed(v) { S.speed = v; $('audio').playbackRate = v; put('bar'); tick(); }
+const starts = () => { const r = cur(); return lay(r).turns.filter(u => u.who !== 'tool').map(u => u.a - r.x.t0); };
+// Every 100 ms: the playhead, the clock, what's being said, the link's second. Nothing is redrawn but what moved.
+function tick() {
+  const r = S.view != null && cur();
+  if (!r) return;
+  const a = $('audio'), D = r.x.D, live = LIVE.includes(r.status), audio = !!a.getAttribute('src');
+  if (live) S.t = D;
+  else if (audio && !a.paused) S.t = Math.min(D, a.currentTime);
+  else if (S.playing) { S.t = Math.min(D, S.t + 0.1 * S.speed); if (S.t >= D) S.playing = false; }
+  S.t = Math.min(S.t, D);  // a ?t= past the end
+  const playing = audio ? !a.paused : S.playing;
+  $('testview').style.setProperty('--p', Math.min(1, S.t / D));
+  if ($('clock')) $('clock').textContent = at(S.t);
+  if ($('play')) $('play').innerHTML = playing ? ICON.pause + 'Pause' : ICON.play + 'Play';
+  const now = starts().reduce((k, s, i) => s <= S.t + 0.3 ? i : k, -1);
+  if (now !== S.cur) { S.cur = now; if (!S.insp) put('inspector'); }
+  // In the tab: the last row that has started lights up, and stays in view while playing.
+  const rows = [...document.querySelectorAll('#body [data-a]')], on = rows.reduce((k, row, i) => +row.dataset.a <= S.t + 0.3 ? i : k, -1);
+  rows.forEach((row, i) => { const was = row.classList.contains('on'); row.classList.toggle('on', i === on);
+    if (i === on && !was && playing) row.scrollIntoView({block: 'nearest', behavior: 'smooth'}); });
+}
+setInterval(tick, 100);
+
+// Keyboard, as in media players and trace viewers: Space, ← →, J / K, / and Esc.
+addEventListener('keydown', e => {
+  if (S.view == null || e.ctrlKey || e.metaKey || e.altKey || /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName)) {
+    if (e.key === 'Escape' && document.activeElement?.id === 'q') document.activeElement.blur();
+    return;
+  }
+  const go = {' ': () => play(), ArrowLeft: () => seekTo(S.t - 5), ArrowRight: () => seekTo(S.t + 5),
+    j: () => { const n = starts().find(s => s > S.t + 0.05); if (n != null) { S.insp = null; seekTo(n); } },
+    k: () => { const p = starts().filter(s => s < S.t - 0.5).at(-1); S.insp = null; seekTo(p ?? 0); },
+    '/': () => { if (S.tab !== 'traces') tab('traces'); $('q')?.focus(); },
+    Escape: () => { S.insp = null; put('inspector'); }}[e.key];
+  if (go) { e.preventDefault(); go(); }
+});
+
+// ---- the page ----
+
+function route() {  // the run overview, or one test as the C board
+  S.view = R.test || (served ? +(location.pathname.match(/\/tests\/(\d+)$/)?.[1]) : +(location.hash.match(/^#tests\/(\d+)$/)?.[1])) || null;
+  const r = S.view != null && cur();
+  if (!r) S.view = null;
+  $('overview').hidden = !!r;
+  $('testview').hidden = !r;
+  const failed = R.results.filter(o => dot(o) === 'F').length, ended = R.results.filter(o => o.finished_at).length;
+  document.title = r ? `#${r.test} ${r.scenario.name} · run ${R.run.id} · LiveTest`
+    : !served ? `LiveTest · run ${R.run.id}` : LIVE.includes(R.run.status) ? `${ended}/${R.results.length} · ${R.run.id}`
+    : R.run.status === 'stopped' ? `■ ${R.run.id} stopped` : `${failed ? '✗' : '✓'} ${R.run.id} finished`;  // what the browser tab shows
+  if (r) {
+    const a = $('audio'), src = r.audio || '';
+    if ((a.getAttribute('src') || '') !== src) { src ? a.setAttribute('src', src) : a.removeAttribute('src'); a.playbackRate = S.speed; }
+    a.onplay = a.onpause = () => put('bar');
+    if (S.insp?.ref) {  // a refetch (or a ?span= link): the same thing, fresh; gone, back to following playback
+      const [k, i] = S.insp.ref, it = things(r)[k]?.[i];
+      S.insp = it ? {...inspect[k](r, it), ref: [k, i]} : null;
+    }
+    put(...TEST);
+  } else {
+    put('summary', 'live', 'problems', 'scenarios');
+    $('live').hidden = !drawn.live;
+  }
+  tick();
 }
 
 function start(data) {
+  const first = !R;
   R = data;
   for (const r of R.results) {
     for (const k of ['scenario', 'profile', 'checks', 'usage']) r[k] = r[k] && JSON.parse(r[k]);
     r.x = derive(r);
   }
   R.problems = problemList();
-  S.sel = Math.max(0, R.results.findIndex(r => dot(r) === 'F'));  // open on the first failure
-  const file = decodeURIComponent(location.pathname.split('/').pop());
-  $('file').textContent = file;
-  $('made').textContent = `· generated ${new Date(R.made).toLocaleString('en-GB', {dateStyle: 'medium', timeStyle: 'short'})} · LiveTest ${R.run.version} · works offline`;
-  $('warn').textContent = `This file contains the agent’s system prompt${R.results.some(r => r.audio) ? ' and the recordings' : ''}. Share it only with people who may see them. No keys are included.`;
-  $('footer').innerHTML = `Made with <span class="mono">livetest report create --run ${esc(R.run.id)}${R.test ? ` --test ${R.test}` : ''}</span> · one self-contained file: no server, no internet needed.`;
-  document.title = `LiveTest · run ${R.run.id}${R.test ? ` · test ${R.test}` : ''}`;
-  for (const id of ['summary', 'problems', 'scenarios']) $(id).hidden = !!R.test;  // a one-test file is just that test
-  put('test', 'traces', 'logs', 'agent', ...(R.test ? [] : ['summary', 'problems', 'scenarios']));
-  hookAudio();
+  const cli = `livetest report create --run ${esc(R.run.id)}${R.test ? ` --test ${R.test}` : ''}`;
+  if (served) {
+    const id = encodeURIComponent(R.run.id), test = location.pathname.match(/\/tests\/(\d+)$/)?.[1];
+    if (first) {  // the app's sidebar and crumbs; a link that opens at a second, a tab, a span
+      document.body.classList.add('served');
+      $('nav').hidden = false;
+      $('brand').innerHTML = `<a href="/#runs" style="color:var(--muted);text-decoration:none">Runs</a><span class="muted">/</span>
+        ${test ? `<a class="mono" href="/runs/${id}" style="color:var(--muted);text-decoration:none">${esc(R.run.id)}</a><span class="muted">/</span><span>test ${esc(test)}</span>` : `<span class="mono">${esc(R.run.id)}</span>`}`;
+      if (!test) $('save').innerHTML = `<code class="mono muted" style="padding:4px 10px;border:1px solid var(--line);border-radius:6px">${esc(location.host + location.pathname)}</code>
+        <button class="btn sm" onclick="copyLink(this)">Copy link</button>`;
+      const qs = new URLSearchParams(location.search), t = qs.get('t')?.match(/^(\d+):(\d\d)$/);
+      if (t) S.t = +t[1] * 60 + +t[2];
+      if (TABS[qs.get('tab')]) S.tab = qs.get('tab');
+      if (qs.get('span') != null) S.insp = {ref: ['span', +qs.get('span')]};
+    }
+    $('warn').hidden = true;
+    $('footer').innerHTML = `Report saves this as one file that opens offline, like <span class="mono">${cli}</span>`;
+  } else {
+    $('file').textContent = decodeURIComponent(location.pathname.split('/').pop());
+    $('made').textContent = `· generated ${new Date(R.made).toLocaleString('en-GB', {dateStyle: 'medium', timeStyle: 'short'})} · LiveTest ${R.run.version} · works offline`;
+    $('warn').textContent = `This file contains the agent’s system prompt${R.results.some(r => r.audio) ? ' and the recordings' : ''}. Share it only with people who may see them. No keys are included.`;
+    $('footer').innerHTML = `Made with <span class="mono">${cli}</span> · one self-contained file: no server, no internet needed.`;
+  }
+  route();
+}
+
+// Served by `livetest ui`: fetch this run's rows (or one test's), and again every second while it's live.
+// ponytail: refetches every event each time; fetch only events past the last rowid if big runs get slow
+async function load() {
+  const [, run, test] = location.pathname.match(/^\/runs\/([^/]+)(?:\/tests\/(\d+))?/) || [];
+  const res = await fetch(`/api/runs/${run}${test ? `?test=${test}` : ''}`);
+  if (!res.ok) { document.querySelector('main').textContent = `No such run or test (${res.status}).`; return; }
+  start(await res.json());
+  clearTimeout(timer);  // a Stop starts its own load: keep one poll going
+  if (LIVE.includes(R.run.status)) timer = setTimeout(load, 1000);
+}
+async function stopRun(test) {
+  if (!confirm(test ? `Stop test ${test}? It ends cleanly and keeps what it recorded.` : 'Stop this run? Running tests end cleanly and keep what they recorded; queued ones never start.')) return;
+  await fetch(`/api/runs/${encodeURIComponent(R.run.id)}/stop`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(test ? {test} : {})});
+  load();
+}
+async function sizeOf() {  // the Download test report panel: how big the file will be
+  if (!S.rep || S.size) return;
+  try {
+    const s = await (await fetch(`/api/runs/${encodeURIComponent(R.run.id)}/report/sizes?test=${S.view}`)).json(), b = s.bytes;
+    S.size = b < 1048576 ? `${Math.round(b / 1024)} KB` : `${(b / 1048576).toFixed(1)} MB`;
+    put('thead');
+  } catch {}
+}
+function copyLink(button, here) {
+  const span = S.insp?.ref?.[0] === 'span' ? `&span=${S.insp.ref[1]}` : '';
+  const link = here ? `${location.origin}${location.pathname}?t=${at(S.t)}&tab=${S.tab}${span}` : location.href;
+  navigator.clipboard?.writeText(link).then(() => { button.textContent = 'Copied'; }, () => { button.textContent = 'Copy failed'; });
+}
+function copyJson(button) {
+  const r = cur(), us = lay(r).turns.filter(u => u.who !== 'tool'), it = S.insp || inspect.turn(r, us[Math.max(0, S.cur)]);
+  navigator.clipboard?.writeText(JSON.stringify(it, null, 2)).then(() => { button.textContent = 'Copied'; }, () => { button.textContent = 'Copy failed'; });
 }
 
 const baked = JSON.parse($('data').textContent);
-if (baked) start(baked);
+if (baked) {
+  start(baked);
+  addEventListener('hashchange', () => { Object.assign(S, {t: 0, insp: null, playing: false, cur: -1}); $('audio').pause(); route(); scrollTo(0, 0); });
+} else {
+  served = true;
+  load();
+  addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); location.href = '/#jump'; } });
+}
 </script>
 </body>
 </html>

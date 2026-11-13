@@ -9,17 +9,22 @@ showed (prompt, tools, session options, what it saw of the tester) and log lines
 import asyncio
 import contextvars
 import logging
+import os
 import re
-from collections import Counter
+import time
+import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import get_args
 
+import jwt
 from google.protobuf.json_format import MessageToDict
 from livekit.protocol.agent_pb import agent_session as pb
 
-from livetest.runtime import checks, session, store
-from livetest.runtime.models import Scenario
+from livetest.platform import keys, llm, stt, tts
+from livetest.runtime import checks, session, setup, store, tokens
+from livetest.runtime.models import Agent, Plugin, Profile, Scenario, key_var
 
 log = logging.getLogger("livetest.runner")
 _current = contextvars.ContextVar("result", default=None)  # the test a log line belongs to
@@ -83,6 +88,100 @@ def run_id(v: str) -> str:
     return v
 
 
+def tester_plugin(db, kind: str, name: str | None) -> Plugin:
+    """The tester's LLM / STT / TTS: the one named > LIVETEST_<KIND> > the active one."""
+    if not (name := name or os.environ.get(f"LIVETEST_{kind.upper()}")):
+        if found := store.active(db).get(kind):
+            return found
+        raise ValueError(f"no tester {kind.upper()} yet; see: livetest plugin add --kind {kind} -h")
+    if (found := setup.find(db, Plugin, name)).kind != kind:
+        raise ValueError(f"'{name}' is a {found.kind} plugin, not {kind}; see: livetest plugin list")
+    return found
+
+
+@dataclass
+class Plan:
+    """A run that passed every check before anything was saved: what `run start` shows, and what `launch` runs."""
+    run: str
+    agent: Agent
+    tests: list[tuple[int, Scenario]]
+    rooms: list[str]
+    profile: Profile | None
+    plugins: list[Plugin]  # llm, then stt and tts in voice mode
+    parallel: int
+    folder: Path | None  # voice recordings; None: off, or text mode
+    opening: str | None
+    connect: Callable[[str], tuple[str, str]]  # room → (url, token)
+    key: str | None
+    secret: str | None
+
+    def summary(self) -> str:
+        voice = len(self.plugins) > 1
+        return (f"run id: {self.run}\n{self.agent.name}: {len({n for n, _ in self.tests})} scenarios, {len(self.tests)} "
+                f"tests, {'voice' if voice else 'text'} mode, {self.parallel} in parallel, profile "
+                f"{self.profile.name if self.profile else 'none'}, tester {', '.join(f'{p.kind} {p.name}' for p in self.plugins)}"
+                + (f"\nrecording: {f'on ({self.folder}, one file per test)' if self.folder else 'off'}" if voice else "")
+                + "\nopens: " + (f'tester ("{self.opening}")' if self.opening else "agent"))
+
+
+def prepare(db, home: Path, name: str, items: list[str], *, run: str | None = None, profile: str | None = None,
+            parallel: int = 4, voice: bool = False, plugins: dict[str, str | None] = {}, recordings: bool = True,
+            opening: str | None = None, token: str | None = None) -> Plan:
+    """Check everything a run needs, saving nothing: the agent, the selection, the run id, the profile, the tester's
+    plugins (`plugins` names any but the active ones, by kind) and one token, so a bad token, a profile mismatch or a
+    missing key fails here. `home` is the DB's folder (.env, recordings/). ValueError: bad input;
+    ConnectionError: the token source didn't answer."""
+    agent = setup.find(db, Agent, name)
+    tests = select(items, store.rows(db, Scenario))
+    run = run_id(run) if run else store.next_run_id(db)
+    if store.runs(db, run):
+        raise ValueError(f"run id '{run}' is taken; pick another with --run, or leave it out")
+    if parallel < 1:
+        raise ValueError("--parallel must be 1 or more")
+    found = setup.find(db, Profile, profile) if profile else None
+    used = [tester_plugin(db, kind, plugins.get(kind)) for kind in ("llm", *(("stt", "tts") if voice else ()))]
+    token = token or os.environ.get("LIVETEST_TOKEN")
+    if token and len(tests) > 1:
+        a = agent.name
+        raise ValueError(f"a raw token joins one room, so it runs one test; this selection has {len(tests)}.\n"
+                         f"To run more, save how livetest gets tokens for '{a}': remove it, then add it again with one of\n"
+                         f"  livetest agent rm --name {a} -y\n  livetest agent add --name {a} --sandbox <sandbox-id>\n"
+                         f"  livetest agent add --name {a} --endpoint <your-token-endpoint-url>\n"
+                         f"  livetest agent add --name {a} --url <livekit-server-url>   # asks for its API key and secret")
+    env = home / ".env"
+    key, secret = (keys.get(env, v) for v in setup.secret_vars(Agent, agent.name)) if agent.url else (None, None)
+
+    def connect(room: str) -> tuple[str, str]:
+        return tokens.connect(agent, room, found, token=token, url=os.environ.get("LIVEKIT_URL"), key=key, secret=secret)
+
+    connect(f"livetest-{run}-check")  # fail fast, before anything is saved
+    rooms = ([jwt.decode(token, options={"verify_signature": False}).get("video", {}).get("room", "")] if token  # its room
+             else [f"livetest-{run}-{n}-{uuid.uuid4().hex[:6]}" for n in range(1, len(tests) + 1)])
+    folder = home / "recordings" / f"run-{run}" if voice and recordings else None
+    return Plan(run, agent, tests, rooms, found, used, parallel, folder, opening, connect, key, secret)
+
+
+def queue(db, plan: Plan) -> list[int]:
+    """Save the run and queue its tests; returns their result ids."""
+    return store.start_run(db, plan.run, plan.agent.name, plan.profile, [(s, room) for (_, s), room in zip(plan.tests, plan.rooms)],
+                           "voice" if len(plan.plugins) > 1 else "text")
+
+
+async def launch(db, plan: Plan, ids: list[int], env: Path) -> None:
+    """Run the queued tests with the tester's models, then close them."""
+    key_of = lambda p: keys.get(env, key_var(p.name))
+    think, *voice = plan.plugins
+    tester = llm.llm(think.base_url, think.model, key_of(think))
+    ears_mouth = (stt.stt(voice[0].base_url, voice[0].model, key_of(voice[0])),
+                  tts.tts(voice[1].base_url, voice[1].model, key_of(voice[1]), voice[1].voice_id)) if voice else None
+    try:
+        await run(db, [(i, s, room) for i, (_, s), room in zip(ids, plan.tests, plan.rooms)], plan.connect, tester,
+                  plan.parallel, plan.key, plan.secret, ears_mouth, plan.folder, opening=plan.opening)
+    finally:
+        for model in (tester, *(ears_mouth or ())):
+            await model.aclose()
+
+
 async def run(db, tests: list[tuple[int, Scenario, str]], connect, tester, parallel: int = 4,
               key: str | None = None, secret: str | None = None, voice=None, recordings: Path | None = None,
               opening: str | None = None) -> None:
@@ -127,7 +226,7 @@ async def run_test(db, result: int, scenario: Scenario, room: str, connect, test
             ended = str(e) or type(e).__name__
         finally:
             events = store.events(db, result)
-            outcomes = checks.evaluate(scenario, ended, events) if status == "done" else None
+            outcomes = checks.evaluate(scenario, events) if status == "done" else None
             # Every status: a stopped or failed test still used tokens.
             store.finish_result(db, result, status, ended, outcomes, checks.usage(events))
 
@@ -149,19 +248,49 @@ def _said(items) -> str:
                     for c in i.message.content if c.text)
 
 
+async def _settled(idle: asyncio.Event) -> None:
+    """The agent is done with its turn, and the usage of its last LLM call has had time to arrive."""
+    await idle.wait()
+    await asyncio.sleep(2)  # ponytail: fixed wait, wait for the next session_usage_updated if 2 s ever falls short
+
+
 async def _converse(db, result: int, room, agent, scenario: Scenario, tester, voice, path: Path | None,
                     opening: str | None) -> tuple[str, str]:
-    """(status, ended) once the conversation is over."""
+    """(status, ended) once the conversation is over. The tester's models' usage lands as one `tester_usage` event,
+    counted like LiveKit counts the agent's (they're shared across parallel tests, so only this test's calls)."""
+    from livekit.agents.metrics import ModelUsageCollector
     from livekit.agents.utils.aio import cancel_and_wait
-    from livekit.agents.voice.remote_session import RemoteSession, RemoteSessionEventTypes
+    from livekit.agents.voice.remote_session import RemoteSession
 
     left = asyncio.get_running_loop().create_future()  # 1.7.1 sends no "session ended" event, so the agent leaving is the sign
     room.on("participant_disconnected", lambda p: p.identity == agent.identity and not left.done() and left.set_result(None))
     remote = RemoteSession.from_room(room, agent.identity)
-    for name in get_args(RemoteSessionEventTypes):
-        remote.on(name, lambda ev, name=name: store.event(db, result, "agent", name, _d(ev)))
+    usage = []  # [ts, data] of the latest session_usage_updated: it's cumulative and comes every second, so stored once
+
+    def keep(name: str, ev) -> None:
+        if name == "session_usage_updated":
+            usage[:] = [time.time(), _d(ev)]
+        else:
+            store.event(db, result, "agent", name, _d(ev))
+
+    for f in pb.AgentSessionEvent.DESCRIPTOR.oneofs_by_name["event"].fields:  # every event the session host sends
+        remote.on(f.name, lambda ev, name=f.name: keep(name, ev))
+    used = ModelUsageCollector()
+    count = lambda ev: _current.get() == result and used(ev)
+    models = (tester, *(voice or ()))
+    for m in models:
+        m.on("metrics_collected", count)
     speaking = asyncio.Event()  # the agent started its reply
-    remote.on("agent_state_changed", lambda ev: ev.agent_state_changed.new_state == pb.AS_SPEAKING and speaking.set())
+    idle = asyncio.Event()  # the agent listening (or idle): done with its turn
+    idle_at = (pb.AS_LISTENING, pb.AS_IDLE)
+
+    def state(ev) -> None:
+        new = ev.agent_state_changed.new_state
+        idle.set() if new in idle_at else idle.clear()
+        if new == pb.AS_SPEAKING:
+            speaking.set()
+
+    remote.on("agent_state_changed", state)
     greeted = asyncio.get_running_loop().create_future()  # the agent's first words: its greeting, when it opens
     remote.on("conversation_item_added", lambda ev: (i := ev.conversation_item_added.item).message.role == pb.ASSISTANT
               and not greeted.done() and greeted.set_result(_said([i])))
@@ -177,6 +306,8 @@ async def _converse(db, result: int, room, agent, scenario: Scenario, tester, vo
             store.event(db, result, "tester", name, _d(got))
         if got.agent_state == pb.AS_SPEAKING:  # session_state, asked last: the agent is mid-greeting already
             speaking.set()
+        if got.agent_state in idle_at:
+            idle.set()
         history = await remote.get_chat_history()
         store.event(db, result, "tester", "chat_history", _d(history))
         me = room.local_participant
@@ -198,12 +329,23 @@ async def _converse(db, result: int, room, agent, scenario: Scenario, tester, vo
         await cancel_and_wait(talk, stop)
         if stop in done:
             return "stopped", "stopped by user"
-        if talk in done and not talk.exception() and talk.result() == "no_reply":
-            await asyncio.wait({left}, timeout=2)  # an agent hanging up mid-turn isn't silent: it's still shutting down
+        if not (talk in done and talk.exception()):  # also at max_minutes: a call may still be running
+            # Before leaving: the agent's last LLM call reports its usage once it's done, and an agent hanging up
+            # mid-turn isn't silent: it's still shutting down.
+            settle = asyncio.ensure_future(_settled(idle))
+            await asyncio.wait({left, settle}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+            settle.cancel()
         if left.done():
             return "done", "agent_left"
         return "done", talk.result() if talk in done else "max_minutes"
     finally:
+        for m in models:
+            m.off("metrics_collected", count)
+        store.event(db, result, "tester", "tester_usage", {"usage": [
+            {"kind": u.type.removesuffix("_usage"), **u.model_dump(exclude={"type"}, exclude_defaults=True)}
+            for u in used.flatten()]})
+        if usage:
+            store.event(db, result, "agent", "session_usage_updated", usage[1], usage[0])
         await remote.aclose()
 
 
@@ -220,7 +362,7 @@ async def _turns(db, result: int, remote, tester, prompt: str, n: int, speaking:
                  opening: str | None, greeting: str) -> str:
     """How the conversation ended: max_turns, no_greeting (the agent was to open, and didn't), or no_reply once the
     agent doesn't start a reply within REPLY_S. The tester's LLM gets only `prompt` and the agent's words; `opening` is
-    its first line, as written. Its usage lands as one `tester_usage` event."""
+    its first line, as written."""
     from livekit.agents.llm import ChatContext
 
     if not (opening or greeting):
@@ -232,36 +374,24 @@ async def _turns(db, result: int, remote, tester, prompt: str, n: int, speaking:
     ctx.add_message(role="system", content=prompt)
     if greeting:
         ctx.add_message(role="user", content=greeting)
-    used = Counter()
-    try:
-        for i in range(n):
-            if i == 0 and opening:
-                line = opening
-            else:
-                said = await tester.chat(chat_ctx=ctx).collect()
-                line = said.text
-                if u := said.usage:  # None from a server that doesn't report it
-                    used.update(input_tokens=u.prompt_tokens, input_cached_tokens=u.prompt_cached_tokens,
-                                output_tokens=u.completion_tokens)
-            store.event(db, result, "tester", "tester_turn", {"text": line})
-            ctx.add_message(role="assistant", content=line)
-            speaking.clear()
-            run, spoke = asyncio.ensure_future(remote.run(line)), asyncio.ensure_future(speaking.wait())
-            await asyncio.wait({run, spoke}, timeout=checks.REPLY_S, return_when=asyncio.FIRST_COMPLETED)
-            spoke.cancel()
-            if not (speaking.is_set() or run.done()):
-                run.cancel()
-                return "no_reply"
-            try:
-                items = (await run).items
-            except (RuntimeError, TimeoutError):  # the agent gave up on the turn, e.g. its LLM's 429 after its retries
-                return "no_reply"
-            if reply := _said(items):
-                ctx.add_message(role="user", content=reply)
-        return "max_turns"
-    finally:
-        store.event(db, result, "tester", "tester_usage", {"usage": [
-            {"kind": "llm", "provider": tester.provider, "model": tester.model, **used}] if used else []})
+    for i in range(n):
+        line = opening if i == 0 and opening else (await tester.chat(chat_ctx=ctx).collect()).text
+        store.event(db, result, "tester", "tester_turn", {"text": line})
+        ctx.add_message(role="assistant", content=line)
+        speaking.clear()
+        run, spoke = asyncio.ensure_future(remote.run(line)), asyncio.ensure_future(speaking.wait())
+        await asyncio.wait({run, spoke}, timeout=checks.REPLY_S, return_when=asyncio.FIRST_COMPLETED)
+        spoke.cancel()
+        if not (speaking.is_set() or run.done()):
+            run.cancel()
+            return "no_reply"
+        try:
+            items = (await run).items
+        except (RuntimeError, TimeoutError):  # the agent gave up on the turn, e.g. its LLM's 429 after its retries
+            return "no_reply"
+        if reply := _said(items):
+            ctx.add_message(role="user", content=reply)
+    return "max_turns"
 
 
 async def _voice(db, result: int, room, agent, remote, prompt: str, n: int, tester, voice, path: Path | None,
@@ -272,7 +402,7 @@ async def _voice(db, result: int, room, agent, remote, prompt: str, n: int, test
     from livekit.agents.llm import ChatContext
     from livekit.agents.voice.recorder_io import RecorderIO
 
-    said, replied, turns = asyncio.Queue(), asyncio.Event(), []
+    said, replied, heard, turns = asyncio.Queue(), asyncio.Event(), asyncio.Event(), []
     ctx = ChatContext()
     if greeting:
         ctx.add_message(role="user", content=greeting)
@@ -285,19 +415,33 @@ async def _voice(db, result: int, room, agent, remote, prompt: str, n: int, test
     def item(ev) -> None:
         if ev.item.type != "message":
             return
-        if ev.item.role == "assistant":  # added once the tester stopped speaking: the reply gap starts here
+        # LiveKit's timings of it on the tester's clock: when the tester spoke, or heard the agent (its VAD).
+        metrics = {k: v for k, v in (ev.item.metrics or {}).items() if isinstance(v, float)}
+        if ev.item.role == "assistant":  # added once the tester stopped speaking: the reply wait starts here
             turns.append(ev.item.text_content)
-            store.event(db, result, "tester", "tester_turn", {"text": ev.item.text_content})
-            speaking.clear()
+            # interrupted: the agent cut it off; LiveKit then keeps all the text the tester's LLM had written, since the
+            # tester runs without a transcript synchronizer (text_output=False), not only what was spoken.
+            store.event(db, result, "tester", "tester_turn",
+                        {"text": ev.item.text_content, "interrupted": ev.item.interrupted, "metrics": metrics})
+            if session.user_state != "speaking":  # else the agent's reply has begun already
+                heard.clear()
             replied.clear()
-            said.put_nowait(None)
-        elif ev.item.role == "user":
-            store.event(db, result, "tester", "tester_heard", {"text": ev.item.text_content})  # its STT of the agent
+            said.put_nowait(ev.item.interrupted)
+        elif ev.item.role == "user":  # its STT of the agent
+            store.event(db, result, "tester", "tester_heard", {"text": ev.item.text_content, "metrics": metrics})
 
     remote.on("conversation_item_added", lambda ev: ev.conversation_item_added.item.message.role == pb.ASSISTANT
               and replied.set())
-    session = AgentSession(stt=voice[0], llm=tester, tts=voice[1], vad=inference.VAD())
+    # No preemptive replies: on a shared LLM their cancelled calls would slow the agent under test.
+    session = AgentSession(stt=voice[0], llm=tester, tts=voice[1], vad=inference.VAD(),
+                           turn_handling={"preemptive_generation": {"enabled": False}})
     session.on("conversation_item_added", item)
+    session.on("user_state_changed", lambda ev: ev.new_state == "speaking" and heard.set())  # the tester hears the agent
+    # The tester's own states (listening / thinking / speaking, and when it hears the agent), for its tester_turn spans.
+    for kind in ("agent_state_changed", "user_state_changed"):
+        session.on(kind, lambda ev, kind=kind: store.event(db, result, "tester", f"tester_{kind.removeprefix('agent_')}",
+                                                           {"old_state": ev.old_state, "new_state": ev.new_state},
+                                                           ev.created_at))
     rec = None
     async with utils.http_context.open():  # plugins outside a worker (LiveKit's documented way)
         try:
@@ -319,17 +463,16 @@ async def _voice(db, result: int, room, agent, remote, prompt: str, n: int, test
             elif not await _greeted(speaking, greeted):  # else the session hears it out and replies by itself
                 return "no_greeting"
             for _ in range(n):
-                await said.get()
-                try:
-                    await asyncio.wait_for(speaking.wait(), checks.REPLY_S)
+                if await said.get():  # the agent cut this turn off: it's talking already, and may not have heard it
+                    continue
+                try:  # from the tester's end of speech to it hearing the agent, as checks.replies grades it
+                    await asyncio.wait_for(heard.wait(), checks.REPLY_S)
                 except TimeoutError:
                     return "no_reply"
             await replied.wait()
             return "max_turns"
         finally:
-            store.event(db, result, "tester", "tester_usage", {"usage": [
-                {"kind": u.type.removesuffix("_usage"), **u.model_dump(exclude={"type"}, exclude_defaults=True)}
-                for u in session.usage.model_usage]})
+            store.event(db, result, "tester", "tester_closed", {})  # it stops hearing the agent: checks.replies' end
             if rec:
                 await rec.aclose()
                 store.recorded(db, result, str(path), rec.recording_started_at)

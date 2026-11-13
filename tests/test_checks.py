@@ -11,20 +11,14 @@ from livetest.runtime.models import Scenario
 EVENTS = [tuple(e) for e in json.loads(Path(__file__).with_name("stub_events.json").read_text())]
 
 
-def run(*expect, ended="max_turns", events=EVENTS):
-    return {o["check"]: o for o in checks.evaluate(Scenario(name="s", prompt="p", expect=list(expect)), ended, events)}
-
-
-def replies(events):
-    """The agent's messages in `events`, to edit in place."""
-    return [d["conversation_item_added"]["item"]["message"] for _, _, t, d in events
-            if t == "conversation_item_added" and d["conversation_item_added"]["item"].get("message", {}).get("role") == "ASSISTANT"]
+def run(*expect, events=EVENTS):
+    return {o["check"]: o for o in checks.evaluate(Scenario(name="s", prompt="p", expect=list(expect)), events)}
 
 
 def test_real_run_passes():
     out = run({"type": "tool_called", "name": "lookup"}, {"type": "tool_not_called", "name": "cancel"},
               {"type": "no_tool_errors"}, {"type": "latency", "p95_ms": 2500})
-    assert set(out) == {"silent", "loops", "finished_in_time", "tool_called", "tool_not_called", "no_tool_errors", "latency"}
+    assert set(out) == {"tool_called", "tool_not_called", "no_tool_errors", "latency"}  # the scenario's own, nothing else
     assert all(o["passed"] for o in out.values()), out
     # Expected and actual side by side, on passes too.
     assert out["tool_called"]["actual"] == [{"name": "lookup", "args": {}, "output": "found it", "error": False}]
@@ -52,30 +46,41 @@ def test_latency_over_limit():
     assert not out["passed"] and out["expected"] == {"p95_ms": 1000, "p99_ms": 3000}
 
 
-def test_silent():
-    """A turn the agent doesn't start replying to within 10 s fails, whatever it said later."""
-    last = max(n for n, (_, _, t, d) in enumerate(EVENTS) if t == "agent_state_changed" and d[t]["new_state"] == "AS_SPEAKING")
-    never = EVENTS[:last] + EVENTS[last + 1:]
-    late = [(ts + checks.REPLY_S + 1, *e) if n == last else (ts, *e) for n, (ts, *e) in enumerate(EVENTS)]
-    for events in (never, late):
-        out = run(events=events)["silent"]
-        assert not out["passed"] and out["actual"] == ["thanks"]
+def test_no_checks_of_livetests_own():
+    """A scenario with no checks of its own has none (a no_reply / no_greeting ending fails the test in
+    store.finish_result instead). Loop and time-limit checks come with the LLM judge (v0.2)."""
+    assert checks.evaluate(Scenario(name="s", prompt="p"), EVENTS) == []
+    assert checks.evaluate(Scenario(name="s", prompt="p"), []) == []  # e.g. the agent never greeted
 
 
-def test_loops():
-    events = copy.deepcopy(EVENTS)
-    replies(events)[1]["content"][0]["text"] = "Hello, this is a canned reply!"  # all three replies now alike
-    assert not run(events=events)["loops"]["passed"]
-
-
-def test_no_greeting_is_silent():
-    """The run said the agent opens, and it never did."""
-    out = run(ended="no_greeting", events=[])
-    assert (out["silent"]["passed"], out["silent"]["actual"]) == (False, ["(the agent's greeting)"])
-
-
-def test_max_minutes_fails():
-    assert not run(ended="max_minutes")["finished_in_time"]["passed"]
+def test_replies_pair_on_the_testers_clock():
+    """Each reply goes with the turn that triggered it. Voice: the tester stopped speaking → it heard the agent start;
+    the agent's own speaking state (e.g. resuming after a false interruption) doesn't count. A turn the agent cut off
+    isn't graded; one never answered fails the latency check."""
+    def turn(ts, a, b, cut=False):
+        return (ts, "tester", "tester_turn", {"text": "t", "interrupted": cut, "metrics": {"started_speaking_at": a,
+                                                                                         "stopped_speaking_at": b}})
+    speaking = lambda ts: (ts, "agent", "agent_state_changed", {"agent_state_changed": {"new_state": "AS_SPEAKING"}})
+    # The tester's VAD hearing the agent start; its ts is the SDK's created_at (the tester_heard item comes later)
+    heard = lambda _, at: (at, "tester", "tester_user_state_changed", {"old_state": "listening", "new_state": "speaking"})
+    voice = [turn(5.1, 2, 5), speaking(5.5), heard(9, 6.2), speaking(9.5),  # 9.5: a resume, not a reply
+             turn(10.1, 9.8, 10, cut=True),
+             heard(21, 19.5), turn(20.1, 18, 20),  # 19.5: its previous reply finishing over turn 3, not an answer
+             (31, "tester", "tester_closed", {})]  # 11 s of nothing heard after turn 3
+    assert checks.replies(voice) == [{"turn": 1, "at": 5, "gap": 1.2000000000000002}, {"turn": 3, "at": 20, "gap": None}]
+    out = run({"type": "latency", "p95_ms": 5000}, events=voice)["latency"]
+    assert not out["passed"] and out["actual"] == {"p95_ms": None}
+    # The tester says bye and the agent hangs up within REPLY_S: that last turn isn't graded.
+    assert [r["turn"] for r in checks.replies(voice[:-1])] == [1]
+    # max_minutes mid-reply: the agent started 3 s after the turn, no tester_heard item yet; still answered.
+    cut = [turn(5.1, 2, 5), heard(None, 8), (9, "tester", "tester_closed", {})]
+    assert checks.replies(cut) == [{"turn": 1, "at": 5, "gap": 3}]
+    # max_minutes at 16 s closes the tester; the agent speaks at 17 s, unheard, during livetest's usage wait: not graded.
+    late = [turn(10.1, 8, 10), (16, "tester", "tester_closed", {}), speaking(17), (21, "tester", "tester_usage", {"usage": []})]
+    assert checks.replies(late) == []
+    # Text: the agent only spoke after the tester's next line, so the first line went unanswered.
+    text = [(1, "tester", "tester_turn", {"text": "a"}), (12, "tester", "tester_turn", {"text": "b"}), speaking(13)]
+    assert [r["gap"] for r in checks.replies(text)] == [None, 1]
 
 
 def test_usage():
@@ -101,11 +106,13 @@ def test_usage():
 def test_verdict_stored(tmp_path):
     db = store.connect(tmp_path / "t.db")
     s = Scenario(name="s", prompt="p")
-    a, b, c = store.start_run(db, "r", "agent", None, [(s, "r")] * 3)
+    a, b, c, d, e = store.start_run(db, "r", "agent", None, [(s, "r")] * 5)
     store.finish_result(db, a, "done", "max_turns", [{"check": "x", "passed": True}])
     store.finish_result(db, b, "done", "max_minutes", [{"check": "x", "passed": True}, {"check": "y", "passed": False}])
     store.finish_result(db, c, "never_joined", "no agent", None, {"agent": [], "tester": []})
-    got = [(store.result(db, n)["passed"], store.result(db, n)["checks"]) for n in (a, b, c)]
-    assert got == [(1, '[{"check": "x", "passed": true}]'), (0, got[1][1]), (None, None)]
+    store.finish_result(db, d, "done", "no_reply", [])  # the agent stopped answering: failed, checks or not
+    store.finish_result(db, e, "done", "no_greeting", [])
+    got = [(store.result(db, n)["passed"], store.result(db, n)["checks"]) for n in (a, b, c, d, e)]
+    assert got == [(1, '[{"check": "x", "passed": true}]'), (0, got[1][1]), (None, None), (0, "[]"), (0, "[]")]
     assert [store.result(db, n)["usage"] for n in (a, c)] == [None, '{"agent": [], "tester": []}']  # unchecked tests too
     db.close()
