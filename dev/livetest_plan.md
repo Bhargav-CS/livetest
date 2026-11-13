@@ -56,7 +56,14 @@ curl -LsSf https://raw.githubusercontent.com/Bhargav-CS/livetest/main/install.sh
 irm https://raw.githubusercontent.com/Bhargav-CS/livetest/main/install.ps1 | iex          # Windows
 ```
 
-- Both scripts install uv if it's missing, then run `uv tool install git+https://github.com/Bhargav-CS/livetest@<tag>`, then `livetest init`, which prints the next steps: the web UI (`livetest ui show`) or the terminal commands.
+- Both scripts find the version, stop the background UI (an upgrade), install uv if it's missing, then run `uv tool install --force --refresh-package livetest --python 3.13 https://github.com/Bhargav-CS/livetest/archive/<ref>.zip` (no git needed), then `livetest init`, which prints the next steps: the web UI (`livetest ui show`) or the terminal commands.
+  - `--python 3.13`: on a machine without Python, uv otherwise picks its newest (3.15), which livekit-agents 1.7.1 has no wheels for (found 2026-11-13 in a fresh Debian container). Bump it with `requires-python`.
+  - `--refresh-package livetest`: with the same URL (a branch), uv otherwise reuses its cached build.
+  - Every dependency is pinned `==` in `pyproject.toml` (the direct three, then a generated block of the ~72 they pull in): `uv tool install` ignores `uv.lock`, so users get exactly what was tested. Only livetest's own tool environment is affected, nothing else on the machine.
+  - **Later (user, 2026-11-13):** a CI check on merges to `main` that bumps the version and keeps the pins and `uv.lock` in sync.
+- `<ref>` is the latest GitHub release's tag; `LIVETEST_REF` picks another (a tag from the Releases page, or a branch). Upgrading = running the script again. Uninstall: `uv tool uninstall livetest`, and delete `~/.livetest` for the data.
+- GitHub Packages has no Python registry, so releases are the only channel; a built wheel attached to each release (needs an Actions workflow) only if install time becomes a complaint.
+- User docs are GitHub-rendered markdown: `README.md` (what it is, install, quick start, short concepts) linking to `docs/install.md`, `docs/quickstart.md`, `docs/commands.md`. A Pages site later is one `docs/_config.yml` (a theme), no rewrite.
 - uv downloads its own Python 3.13, so the user needs neither Python nor pip.
 - winget needs a real installer or binary (see "Tech stack"), so it comes later.
 
@@ -367,8 +374,8 @@ livetest/
 ├── ui/            entry point: report.py (static/run.html with a run's rows baked in), server.py (aiohttp + JSON API serving run.html and static/app.html, the shell)
 └── cli.py         entry point
 tests/             pytest (dev-only dependency); test_layers.py enforces the rule below
-dev/               contributor-only: livekit-server.yaml (self-hosted LiveKit for the live tests)
-docs/              this plan and the research
+dev/               contributor-only: this plan, the research, livekit-server.yaml (self-hosted LiveKit for the live tests)
+docs/              user docs, linked from README.md
 ```
 
 - **Empty placeholder files are kept on purpose:** they mark where a later implementation goes (user, 2026-11-08).
@@ -449,7 +456,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | 10 | [x] | `report create`: one offline HTML file | `ui/report.py`, `ui/static/` | open the file | no |
 | 11 | [x] | `livetest ui`: aiohttp + JSON API + the A/C page | `ui/server.py`, `ui/static/` | browser | no |
 | 12 | — | ~~`livetest doctor`~~: dropped (user, 2026-11-13). What it would check is already checked by `init`, `agent add`, `plugin add` and `run start` | | | |
-| 13 | [ ] | Install scripts (sh / iex via `uv tool install`), ending with `livetest init`; upgrading = re-running them, which stops the background UI first | `install.sh`, `install.ps1` | fresh install on Windows | no |
+| 13 | [x] | Install scripts (sh / iex via `uv tool install` of the latest release's source archive), ending with `livetest init`; upgrading = re-running them, which stops the background UI first; user docs (README + `docs/*.md`) | `install.sh`, `install.ps1`, `README.md`, `docs/` | fresh install on Windows, `install.sh` in a Linux container | no |
 
 - **Decided before module 5:** no session-host-off fallback (`lk.chat`); the session host is required (user, 2026-11-08).
 - **The UI ships in v0.1** (user confirmed before module 11, 2026-11-12).
