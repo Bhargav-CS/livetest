@@ -412,6 +412,18 @@ def listed(run, capsys, *flags):
     return json.loads(capsys.readouterr().out)
 
 
+def test_run_start_checks_tester_plugins(run, ready, monkeypatch, capsys):
+    """A tester LLM that stopped answering since `plugin add` fails the run before anything is saved."""
+    async def dead(*a):
+        raise ConnectionError("refused")
+
+    monkeypatch.setattr(llm, "check", dead)
+    capsys.readouterr()
+    assert run("run", "start", "--name", "bot", "--scenario", "1", "-y") == 3
+    assert "m at http://x/v1 didn't answer (refused); check the URL, model and key" in capsys.readouterr().err
+    assert listed(run, capsys) == []
+
+
 def test_run_start_and_list(run, ready, monkeypatch, capsys):
     seen = finishes(monkeypatch, *[("done", True)] * 3)
     assert run("run", "start", "--name", "bot", "--scenario", "1-3", "-y") == 0

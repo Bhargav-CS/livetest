@@ -325,10 +325,10 @@ def cmd_run_start(db: sqlite3.Connection, args: argparse.Namespace) -> int:
     name = need(args.name, "Agent to test: ", "--name")
     items = args.scenario or need(None, "Scenarios to run (e.g. 1-5 7x3, or all): ", "--scenario").split()
     try:
-        plan = user(lambda: runner.prepare(
+        plan = user(lambda: asyncio.run(runner.prepare(
             db, args.db.parent, name, items, run=args.run, profile=args.profile, parallel=args.parallel, voice=args.voice,
             plugins={"llm": args.llm, "stt": args.stt, "tts": args.tts}, recordings=args.recordings,
-            opening=args.start_conversation, token=args.token))
+            opening=args.start_conversation, token=args.token)))
     except ConnectionError as e:
         print(f"error: {e}", file=sys.stderr)
         return 3
@@ -649,7 +649,8 @@ def main(argv: list[str] | None = None) -> int:
                         "Prints each test's verdict at the end; run logs follows the conversations. Ctrl+C stops the\n"
                         "run like run stop, keeping what it recorded. A test fails if the agent doesn't start a reply within 10 s;\n"
                         "provider errors it retries past only show up as a count of agent errors.\n"
-                        "Exit code: 0 all passed, 1 a test failed, 2 bad input, 3 the agent never joined.")
+                        "Exit code: 0 all passed, 1 a test failed, 2 bad input, 3 couldn't connect: the token source, a tester\n"
+                        "plugin, or the agent.")
     p.add_argument("--name", help="the agent to test")
     p.add_argument("--scenario", nargs="+", metavar="ITEM", help="what to run: 7, 1-20, a name or all; xN repeats")
     p.add_argument("--run", metavar="ID", help="the run's id (default: the next free number)")

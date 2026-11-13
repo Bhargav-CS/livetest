@@ -77,7 +77,6 @@ profile  (who the user is)                ─┘
 ```
 livetest                                   overview, grouped by purpose, plus "start here"          ✓
 livetest init                              set up the DB, then say what's next (the install runs it)  ✓
-livetest doctor                            check the setup, fix common problems
 livetest uninstall                         (later)
 
 livetest agent    add | list | remove                               --name <agent_name>        ✓
@@ -271,7 +270,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
    - [~] Grafana panel playing the recording next to traces
    - [x] Every run stored in `~/.livetest/livetest.db` (SQLite), recordings next to it (see "Results, logs and the UI"): `runs` + `results` + `events`, recordings as paths on `results`
    - [x] Log lines as `events` rows, tagged with their test through a `contextvar` (parallel-safe); console logging in `platform/logging.py`, `-v` global; tracebacks in `~/.livetest/errors.log` for bug reports (module 7)
-   - [x] `livetest run start|list|logs|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop (DB statuses), `--json`, exit codes, 10 s reply rule (`cli.py`, `runtime/runner.py`, `runtime/store.py`)
+   - [x] `livetest run start|list|logs|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop (DB statuses), `--json`, exit codes, 10 s reply rule (`cli.py`, `runtime/runner.py`, `runtime/store.py`); fails before anything is saved when the token source or a tester plugin doesn't answer (`runner.prepare`, CLI and UI)
    - [x] `livetest report create`: one self-contained HTML per run or per test, recordings and fonts embedded (`--no-recordings` leaves them out); LiveKit's per-turn metrics as reported, nothing placed by guesswork (`ui/report.py`, `ui/static/run.html`, module 10; the test view becomes the C design in module 11)
    - [ ] `livetest report gate`: user-defined CI rules (later)
    - [ ] Optional OTLP export (Grafana, Langfuse, etc.); not required for a first run
@@ -294,7 +293,7 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
 
 6. **CLI usability**
    - [x] CLI standard (see "CLI standard"): grouped root help, help on bare groups, `remove`/`rm`, confirmation with `-y`, `--name` flags, `--json` on `list` and `run logs`, global `-v`, exit codes
-   - [ ] `livetest doctor`: finds and fixes common user issues (missing keys, bad token source, server unreachable), so users never debug at code level
+   - ~~`livetest doctor`~~: dropped (user, 2026-11-13). `init` lists what's missing, `agent add` / `plugin add` check before saving, `run start` fails fast on keys and the token source, and each error names the command that fixes it
 
 ### Extras, ranked by value
 
@@ -448,8 +447,8 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | 8 | [x] | Usage: the agent's (its session usage) and the tester's (its LLM's tokens), saved on each result; no cost (user, 2026-11-12) | `runtime/checks.py`, `runtime/runner.py`, `runtime/store.py`, `platform/llm.py`, `cli.py` | pytest on saved usage | no |
 | 9 | [x] | Voice mode and recording (after the test ends) | `runtime/runner.py` | self-hosted, voice stub | yes |
 | 10 | [x] | `report create`: one offline HTML file | `ui/report.py`, `ui/static/` | open the file | no |
-| 11 | [ ] | `livetest ui`: aiohttp + JSON API + the A/C page | `ui/server.py`, `ui/static/` | browser | no |
-| 12 | [ ] | `livetest doctor` | `cli.py` | pytest | partly |
+| 11 | [x] | `livetest ui`: aiohttp + JSON API + the A/C page | `ui/server.py`, `ui/static/` | browser | no |
+| 12 | — | ~~`livetest doctor`~~: dropped (user, 2026-11-13). What it would check is already checked by `init`, `agent add`, `plugin add` and `run start` | | | |
 | 13 | [ ] | Install scripts (sh / iex via `uv tool install`), ending with `livetest init`; upgrading = re-running them, which stops the background UI first | `install.sh`, `install.ps1` | fresh install on Windows | no |
 
 - **Decided before module 5:** no session-host-off fallback (`lk.chat`); the session host is required (user, 2026-11-08).
@@ -459,7 +458,7 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 
 | Version | Scope |
 |---|---|
-| v0.1 | See "v0.1 build order": connection modes, `-h` everywhere, `agent add` that joins, scenarios + profiles, text mode (voice optional), recording, deterministic checks, parallel, usage, SQLite results, `report`, UI, `doctor`, exit codes, standalone install. No judge |
+| v0.1 | See "v0.1 build order": connection modes, `-h` everywhere, `agent add` that joins, scenarios + profiles, text mode (voice optional), recording, deterministic checks, parallel, usage, SQLite results, `report`, UI, exit codes, standalone install. No judge |
 | v0.2 | Local tester models, cost (price table and user-set prices, on top of saved usage), STT accuracy, judge (once designed) with reply-time, loop and time-limit checks, multi-agent agents (handoffs, tasks: see Extras); consider: agent errors failing a test (or v0.3) |
 | v0.3 | `generate`, repeat-N, `diff`, JUnit and GitHub Action, MCP server |
 | v0.4 | Perturbations, security pack, concurrency, SIP |

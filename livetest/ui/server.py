@@ -108,11 +108,11 @@ def app(path: Path) -> web.Application:
         b = await request.json()
         try:
             # ponytail: the fail-fast token fetch blocks this loop for its HTTP call (~1 s); move it to a thread if it bites
-            plan = runner.prepare(db, path.parent, b.get("name") or "", b.get("scenario") or [], run=b.get("run") or None,
-                                  profile=b.get("profile") or None, parallel=int(b.get("parallel") or 4),
-                                  voice=bool(b.get("voice")), plugins=b.get("plugins") or {},
-                                  recordings=b.get("recordings", True), opening=b.get("start_conversation") or None,
-                                  token=b.get("token") or None)
+            plan = await runner.prepare(db, path.parent, b.get("name") or "", b.get("scenario") or [], run=b.get("run") or None,
+                                        profile=b.get("profile") or None, parallel=int(b.get("parallel") or 4),
+                                        voice=bool(b.get("voice")), plugins=b.get("plugins") or {},
+                                        recordings=b.get("recordings", True), opening=b.get("start_conversation") or None,
+                                        token=b.get("token") or None)
         except ValueError as e:
             return fail(400, e)
         except ConnectionError as e:
