@@ -24,14 +24,19 @@ You don't need Python. To upgrade, run the same line again. To pick a version or
 ## Quick start
 
 ```sh
-livetest plugin add --kind llm --plugin my-groq --provider groq --model openai/gpt-oss-120b   # the tester's LLM
-livetest agent add --name my-agent --sandbox my-sandbox-id                                  # your agent
-livetest scenario add --scenario reschedule --prompt 'You want your Tuesday slot moved to Friday.' --tool-called reschedule
-livetest run start --name my-agent --scenario all
-livetest ui show                                                                            # or: livetest report create --run latest
+livetest ui show
 ```
 
-The [Quick start](docs/quickstart.md) walks through it, including voice tests and profiles.
+This opens the web UI at `http://127.0.0.1:8787` (on this machine only). Until your first run, it shows a **Welcome** page with four steps:
+
+1. **Add agent:** your agent's LiveKit `agent_name` and how to get a token (a sandbox ID, your token endpoint, or your server's URL). LiveTest joins a room once to check that the agent answers.
+2. **Open Plugins:** pick the tester's LLM, plus an STT and a TTS if you want voice tests. **Test connection** checks each one and saves it.
+3. **Add scenario:** who the tester plays, what it wants, and what must happen (tools called, latency limits).
+4. **Start first run:** one conversation in text mode is the quickest first check.
+
+Runs stream in live. Each test has its transcript, a trace of every turn, tool calls, usage, and the recording for voice tests. **Report** downloads it as one HTML file that opens offline.
+
+Each step also shows its terminal command. The [Quick start](docs/quickstart.md) gives both routes, in the browser and in the terminal (for scripts and CI), plus voice tests and profiles.
 
 ## Concepts
 
