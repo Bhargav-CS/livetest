@@ -9,8 +9,8 @@ livetest is a black-box testing tool for **any** LiveKit agent
 
 The code is in [livetest/](livetest/), layered platform / runtime / integrations (see "Code structure" in the plan). Read these two first:
 
-- [docs/livetest_plan.md](docs/livetest_plan.md): what we're building and its status. Tick the status boxes as features land.
-- [docs/livekit_tester_research.md](docs/livekit_tester_research.md): the technical findings.
+- [dev/livetest_plan.md](dev/livetest_plan.md): what we're building and its status. Tick the status boxes as features land.
+- [dev/livekit_tester_research.md](dev/livekit_tester_research.md): the technical findings.
 
 # Workflow
 
