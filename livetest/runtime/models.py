@@ -95,7 +95,7 @@ class Latency(Strict):
         return self
 
 
-# What a scenario expects; `type` says which check. Built-in checks (never joined, silent, loops) are always on.
+# What a scenario expects; `type` says which check. These are the only checks: livetest adds none of its own.
 Check = Annotated[ToolCheck | NoToolErrors | Latency, Field(discriminator="type")]
 
 

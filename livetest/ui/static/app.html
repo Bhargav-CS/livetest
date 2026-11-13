@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveTest</title>
+<!-- The app shell, as the A board of the LiveTest UI canvas draws it: welcome, runs, setup pages, settings, the
+     Report screen, the New run drawer and Jump to. A run opens run.html. Every form sends what the matching CLI
+     command takes, and the command is shown next to it. -->
+<style>
+@font-face{font-family:Inter;font-weight:400 700;font-display:swap;src:url(/fonts/inter.woff2) format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-weight:400 500;font-display:swap;src:url(/fonts/jetbrains-mono.woff2) format('woff2')}
+:root{--bg:#0b0b0c;--bar:#0f0f10;--panel:#141415;--hover:#1c1c1e;--line:#2a2a2d;--edge:#3a3a3e;--text:#f2f2f3;--muted:#a0a0a8;--sub:#c8c8ce;
+  --link:#7dd3fc;--ok:#4ade80;--bad:#fb923c;--live:#3ecbf5}
+body{margin:0;background:var(--bg);color:var(--text);font:400 14px Inter,system-ui,-apple-system,'Segoe UI',sans-serif;display:flex;flex-wrap:wrap;align-items:stretch;min-height:100vh}
+a{color:var(--link)}a:hover{color:#bae6fd}
+[hidden]{display:none!important}
+input,select,textarea{box-sizing:border-box;width:100%;min-height:36px;padding:5px 10px;border:1px solid var(--edge);border-radius:6px;background:var(--bg);color:var(--text);color-scheme:dark;font:400 14px Inter,system-ui,sans-serif}
+textarea{min-height:72px;font:400 13px 'JetBrains Mono',ui-monospace,Consolas,monospace}
+input[type=checkbox]{width:auto;min-height:0}
+h1{margin:0;font-size:22px;font-weight:600}
+.mono{font-family:'JetBrains Mono',ui-monospace,Consolas,monospace;font-size:13px}
+.muted{color:var(--muted)}.bad{color:var(--bad)}.good{color:var(--ok)}
+nav{flex:1 1 220px;max-width:100%;box-sizing:border-box;padding:18px 12px;background:var(--bar);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:2px}
+nav .brand{display:flex;align-items:center;gap:10px;padding:4px 12px 14px;font-weight:700;font-size:16px;letter-spacing:-.01em}
+.nav{display:flex;align-items:center;min-height:38px;box-sizing:border-box;padding:7px 12px;border-radius:6px;color:var(--muted);font-weight:500;text-decoration:none}
+.nav:hover{background:var(--hover);color:var(--text)}.nav.on{background:var(--hover);color:var(--text);box-shadow:inset 2px 0 0 var(--text)}
+.navh{display:flex;align-items:center;gap:8px;margin:14px 0 4px;padding:0 12px;font-size:10px;font-weight:600;letter-spacing:.1em;color:#6e6e76;user-select:none}
+.navh::after{content:"";flex:1;height:1px;background:var(--line)}
+main{flex:999 1 560px;min-width:0;box-sizing:border-box;padding:24px 32px 48px;display:flex;flex-direction:column;gap:18px}
+.page{display:flex;flex-direction:column;gap:16px}
+.head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;box-sizing:border-box;padding:6px 14px;border:1px solid var(--edge);border-radius:6px;background:var(--panel);color:var(--text);font:500 14px Inter,system-ui,sans-serif;cursor:pointer;text-decoration:none}
+.btn:hover{background:var(--hover);color:var(--text)}.btn.primary{background:var(--text);border-color:var(--text);color:var(--bg)}.btn.primary:hover{background:#fff}
+.btn.sm{min-height:30px;padding:3px 10px;font-size:13px}.btn:disabled{opacity:.5;cursor:default}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:16px;min-height:50px;box-sizing:border-box;padding:10px 16px;border-top:1px solid var(--line);color:var(--text);text-decoration:none}
+.row:first-child{border-top:0}a.row:hover{background:#18181a;color:var(--text)}
+.row .grow{flex:1 1 200px;min-width:0;overflow-wrap:anywhere}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
+.seg{min-height:32px;padding:4px 12px;border:1px solid var(--line);background:var(--panel);color:var(--muted);font:500 13px Inter,system-ui,sans-serif;cursor:pointer}
+.seg.on{background:var(--line);color:var(--text)}.seg:first-child{border-radius:6px 0 0 6px}.seg:last-child{border-radius:0 6px 6px 0}
+.tag{min-height:30px;padding:3px 12px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--muted);font:500 13px Inter,system-ui,sans-serif;cursor:pointer}
+.tag.on{background:var(--text);color:var(--bg);border-color:var(--text)}
+.livedot{width:8px;height:8px;border-radius:50%;background:var(--live);animation:pulse 1.4s infinite;flex-shrink:0}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(62,203,245,.5)}70%{box-shadow:0 0 0 7px rgba(62,203,245,0)}100%{box-shadow:0 0 0 0 rgba(62,203,245,0)}}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.card{display:flex;flex-direction:column;gap:10px;min-height:170px;box-sizing:border-box;padding:16px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);text-decoration:none}
+.card:hover{border-color:var(--edge);background:#18181a;color:var(--text)}
+.bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden}.bar span{display:block;height:4px}
+.field{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:500;color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.wide{grid-column:1/-1}
+.step{display:flex;flex-wrap:wrap;align-items:center;gap:16px;padding:18px 20px;border-top:1px solid var(--line)}.step:first-child{border-top:0}
+.mark{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;flex-shrink:0;background:var(--hover);color:var(--muted)}
+.mark.done{background:#14532d;color:#dcfce7}.mark.next{background:var(--text);color:var(--bg)}
+.inc{display:flex;flex-wrap:wrap;gap:16px;align-items:center;padding:12px 16px;border-top:1px solid var(--line)}.inc:first-child{border-top:0}
+.cli{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 12px}
+.warn{padding:12px 14px;border-radius:8px;border:1px solid #5a3a1a;background:#1d1510;color:#fed7aa;line-height:1.5}
+.plan{display:flex;flex-direction:column;gap:6px;padding:14px;border-radius:8px;background:var(--bg);border:1px solid var(--line);overflow-wrap:anywhere}
+dialog{color:var(--text);background:var(--panel);border:1px solid var(--line)}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+dialog.drawer{margin:0 0 0 auto;width:min(560px,100vw);height:100vh;max-height:100vh;box-sizing:border-box;padding:22px 24px;border-width:0 0 0 1px}
+.drawer form{display:flex;flex-direction:column;gap:16px}
+/* While something slow runs (an agent joining, a plugin answering, a run starting): the rest greys out, a spinner says what */
+.busy>*:not(.loading){opacity:.5}
+.loading{display:none;align-items:center;gap:8px;font-size:13px;color:var(--text)}.busy .loading{display:flex}
+.spin{width:14px;height:14px;box-sizing:border-box;border:2px solid var(--edge);border-top-color:var(--text);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.picks{border:1px solid var(--line);border-radius:8px;overflow:auto;max-height:340px;font-weight:400}
+.pick{display:flex;align-items:center;gap:10px;min-height:44px;box-sizing:border-box;padding:4px 10px;border-top:1px solid var(--hover)}.pick:first-child{border-top:0}
+.pick label{flex:1;display:flex;gap:10px;align-items:center;cursor:pointer;min-width:0;overflow-wrap:anywhere}
+.pick input[type=number]{width:56px;min-height:30px;padding:2px 6px}
+details>summary{cursor:pointer;font-weight:500;color:var(--muted)}
+dialog.jump{width:min(640px,92vw);margin:110px auto auto;padding:0;border-color:var(--edge);border-radius:10px}
+.jump input{border:0;min-height:52px;font-size:16px;background:transparent;outline:none}
+.pal{display:flex;align-items:center;gap:12px;width:100%;min-height:44px;padding:8px 16px;border:0;background:transparent;color:var(--text);font:inherit;text-align:left;cursor:pointer}
+.pal:hover,.pal:focus{background:var(--hover);outline:none}
+.slots{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.slot{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+@media (max-width:700px){main{padding:16px}nav{border-right:0;border-bottom:1px solid var(--line)}}
+/* beside the page, the sidebar stays in view while the page scrolls */
+@media (min-width:800px){nav{position:sticky;top:0;align-self:flex-start;height:100vh;overflow-y:auto}}
+</style>
+</head>
+<body>
+<nav aria-label="Main">
+  <span class="brand"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12h3l2-6 4 12 2-6h7"/></svg>LiveTest</span>
+  <button class="btn" style="justify-content:space-between;margin-bottom:8px" onclick="openJump()"><span class="muted">Jump to…</span><span class="mono muted" style="font-size:11px">Ctrl K</span></button>
+  <button class="btn primary" style="margin-bottom:6px" onclick="openRun()"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>New run</button>
+  <span class="navh">TEST</span>
+  <a class="nav" href="#runs" data-page="runs">Runs</a><a class="nav" href="#scenarios" data-page="scenarios">Scenarios</a><a class="nav" href="#profiles" data-page="profiles">Profiles</a>
+  <span class="navh">SETUP</span>
+  <a class="nav" href="#agents" data-page="agents">Agents</a><a class="nav" href="#plugins" data-page="plugins">Plugins</a><a class="nav" href="#settings" data-page="settings">Settings</a>
+</nav>
+<main>
+  <div id="msg" role="status" aria-live="polite" hidden></div>
+  <div id="page" class="page"></div>
+</main>
+<dialog id="drawer" class="drawer"></dialog>
+<dialog id="jump" class="jump" aria-label="Jump to">
+  <div style="display:flex;align-items:center;gap:10px;padding:0 16px;border-bottom:1px solid var(--line)">
+    <label for="q" class="muted" style="font-size:13px;white-space:nowrap">Jump to</label>
+    <input id="q" placeholder="run id, scenario, agent, action…" autocomplete="off" oninput="drawJump()" onkeydown="if (event.key === 'Enter') this.closest('dialog').querySelector('.pal')?.click()">
+    <button class="btn sm" onclick="$('jump').close()">Esc</button>
+  </div>
+  <div id="pal"></div>
+</dialog>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);  // every row value is untrusted
+const utc = s => new Date(s.replace(' ', 'T') + 'Z');  // SQLite's CURRENT_TIMESTAMP
+const day = d => d.toLocaleDateString('en-CA');  // YYYY-MM-DD, local
+const ago = (a, b) => Math.round((Date.parse(day(b)) - Date.parse(day(a))) / 864e5);  // whole days between two dates
+const kb = n => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+const LIVE = ['running', 'stopping'];
+const PAGES = {runs: 'Runs', scenarios: 'Scenarios', profiles: 'Profiles', agents: 'Agents', plugins: 'Plugins', settings: 'Settings', report: 'Report'};
+const KIND = {llm: 'Tester LLM', stt: 'Tester STT', tts: 'Tester TTS'};
+const LOCAL = 'Local / OpenAI-compatible';
+const OK = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4ade80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="passed"><path d="M3 8.5l3.2 3L13 4.5"/></svg>';
+const NO = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#fb923c" stroke-width="2" stroke-linecap="round" role="img" aria-label="failed"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+let D = {}, timer, page = 'runs', arg = [], shown = '';
+const V = {view: 'list', range: '7d', from: '', to: '', scope: 'run', test: 1, rec: true};  // what the viewer picked
+
+async function api(path, body, method = 'POST') {
+  const r = await fetch(path, body === undefined ? {} : {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `${r.status} ${r.statusText}`);
+  return d;
+}
+const load = async (...kinds) => { (await Promise.all(kinds.map(k => api('/api/' + k)))).forEach((d, i) => D[kinds[i]] = d); };
+const say = (text, bad = false) => { $('msg').hidden = !text; $('msg').textContent = text; $('msg').className = bad ? 'bad' : 'muted'; };
+const opts = (items, chosen, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') +
+  items.map(([v, l]) => `<option value="${esc(v)}"${v === chosen ? ' selected' : ''}>${esc(l ?? v)}</option>`).join('');
+const field = (label, html, wide) => `<label class="field${wide ? ' wide' : ''}">${label}${html}</label>`;
+const input = (name, attrs = '') => `<input name="${name}" ${attrs}>`;
+const area = (name, placeholder) => `<textarea name="${name}" placeholder="${esc(placeholder)}"></textarea>`;
+const loading = text => `<div class="loading" role="status"><span class="spin" aria-hidden="true"></span><span>${text}</span></div>`;
+const cliBar = cli => `<div class="panel cli"><span class="muted" style="font-size:12px;font-weight:600">CLI</span><code class="mono">${esc(cli)}</code></div>`;
+const score = s => s && `<span class="chip" style="background:${s.passed === s.graded ? '#0f2a1a' : '#3b1d0d'};color:${s.passed === s.graded ? '#86efac' : '#fdba74'}" title="last score, run ${esc(s.run)}">${s.passed} / ${s.graded}</span>`;
+
+// What the CLI's flags take: values read as JSON when they parse (42, true, {"a": 1}), else as text.
+const value = v => { try { return JSON.parse(v); } catch { return v; } };
+const meta = v => { const m = value(v); return m && typeof m === 'object' && !Array.isArray(m) ? m : v; };  // LiveKit metadata: an object or text
+const lines = t => (t || '').split('\n').map(l => l.trim()).filter(Boolean);
+const kv = (items, parse) => Object.fromEntries(items.map(x => {  // spaces around = don't count, as in the CLI
+  const i = x.indexOf('=');
+  if (i < 1) throw new Error(`expected key=value, got '${x}'`);
+  return [x.slice(0, i).trim(), parse(x.slice(i + 1).trim())];
+}));
+const given = o => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== '' && v != null));  // blanks take the model's defaults
+
+const text = v => typeof v === 'string' ? v : JSON.stringify(v);
+const brief = ({participant: t, room, dispatch}) => [t.identity !== 'tester' && `identity ${t.identity}`, t.name && `name ${t.name}`,
+  Object.keys(t.attributes).length && `attributes ${Object.entries(t.attributes).map(([k, v]) => `${k}=${v}`).join(', ')}`,
+  t.metadata != null && `metadata ${text(t.metadata)}`, room.metadata != null && `room ${text(room.metadata)}`,
+  dispatch.metadata != null && `job ${text(dispatch.metadata)}`].filter(Boolean).join(' · ') || 'a plain participant';
+const source = a => a.sandbox ? `sandbox ${a.sandbox}` : a.endpoint ? `endpoint ${a.endpoint}` : a.url ? `url ${a.url}` : 'token at run time';
+
+// ---- pages ----
+
+const runIcon = r => LIVE.includes(r.status) ? '<span class="livedot" aria-label="live"></span>' : r.status === 'stopped' ? '<span class="muted" aria-label="stopped">■</span>'
+  : !r.checked ? '' : r.passed === r.checked ? OK : NO;
+function when(r, now) {  // today: how long ago; yesterday: the time; before: the date
+  const t = utc(r.started_at), d = ago(t, now), min = Math.round((now - t) / 6e4);
+  if (LIVE.includes(r.status)) return 'live';
+  if (!d) return min < 1 ? 'just now' : min < 60 ? `${min} min ago` : `${Math.floor(min / 60)} h ago`;
+  return d === 1 ? t.toTimeString().slice(0, 5) : t.toLocaleDateString('en-GB', {day: 'numeric', month: 'short'});
+}
+const runMeta = r => `${r.profile || 'no profile'} · ${r.mode} · ${r.tests} test${r.tests === 1 ? '' : 's'}`;
+
+function welcome() {  // until the first run: four steps, each also a command
+  const done = [D.agents.length, D.plugins.some(p => p.kind === 'llm' && p.active), D.scenarios.length, D.runs.length];
+  const next = done.findIndex(d => !d);
+  const steps = [
+    ['Add the agent you want to test', 'Its LiveKit agent_name and how to get a token (sandbox ID, token endpoint or server URL). LiveTest joins a room once to check it answers.', 'livetest agent add --name my-agent --sandbox <id>', "openAdd('agents')", 'Add agent'],
+    ['Choose the tester’s brain and voice', 'An LLM to play the user, and STT/TTS for voice tests. Cloud providers or anything running locally (Ollama, vLLM, a local Whisper).', 'livetest plugin add --kind llm', "location.hash = '#plugins'", 'Open Plugins'],
+    ['Write your first scenario', 'Who the tester plays, what it wants and how it talks, and what must happen.', "livetest scenario add --scenario reschedule --prompt '...'", "openAdd('scenarios')", 'Add scenario'],
+    ['Run it', 'One conversation in text mode is the quickest first check.', 'livetest run start --name my-agent --scenario 1', 'openRun()', 'Start first run']];
+  return `<div style="display:flex;flex-direction:column;gap:16px;max-width:900px">
+    <h1 style="font-size:24px">Welcome to LiveTest</h1>
+    <p class="muted" style="margin:0;font-size:15px;line-height:1.6">Four steps to your first test. Every step can also be done in the terminal: the command is next to it.</p>
+    <div class="panel">${steps.map(([title, desc, cli, go, action], i) => `<div class="step">
+      <span class="mark${done[i] ? ' done' : i === next ? ' next' : ''}" aria-hidden="true">${done[i] ? '✓' : i + 1}</span>
+      <div style="flex:1 1 300px;display:flex;flex-direction:column;gap:4px"><span style="font-weight:600;font-size:15px">${title}${done[i] ? ' <span class="muted" style="font-weight:400">· done</span>' : ''}</span>
+        <span class="muted" style="font-size:13px">${desc}</span><code class="mono muted">$ ${esc(cli)}</code></div>
+      ${i === next ? `<button class="btn primary" onclick="${go}">${action}</button>` : ''}</div>`).join('')}</div></div>`;
+}
+
+const VIEWS = {
+  runs() {
+    if (!D.runs.length) return welcome();
+    const now = new Date(), inRange = r => {
+      const d = day(utc(r.started_at));
+      if (V.from || V.to) return (!V.from || d >= V.from) && (!V.to || d <= V.to);
+      return V.range === 'all' || ago(utc(r.started_at), now) <= {today: 0, '7d': 7, '30d': 30}[V.range];
+    };
+    const runs = [...D.runs].reverse().filter(inRange), groups = [];
+    for (const r of runs) {
+      const t = utc(r.started_at), d = ago(t, now);
+      const label = !d ? 'TODAY' : d === 1 ? 'YESTERDAY' : t.toLocaleDateString('en-GB', {day: 'numeric', month: 'short'}).toUpperCase();
+      (groups.at(-1)?.label === label ? groups.at(-1) : groups[groups.push({label, runs: []}) - 1]).runs.push(r);
+    }
+    const href = r => `/runs/${encodeURIComponent(r.id)}`, pct = r => r.checked ? Math.round(r.passed / r.checked * 100) : 0;
+    const color = r => LIVE.includes(r.status) ? 'var(--live)' : r.checked && r.passed === r.checked ? 'var(--ok)' : 'var(--bad)';
+    const list = groups.map(g => `<div style="display:flex;flex-direction:column;gap:6px"><div class="muted" style="font-size:12px;font-weight:600;letter-spacing:.05em">${g.label}</div>
+      <div class="panel">${g.runs.map(r => `<a class="row" href="${href(r)}"><span style="display:flex;align-items:center;width:18px">${runIcon(r)}</span>
+        <span class="mono" style="width:110px;overflow-wrap:anywhere">${esc(r.id)}</span><span style="width:190px;overflow-wrap:anywhere">${esc(r.agent)}</span>
+        <span class="muted grow">${esc(runMeta(r))}</span><span style="width:80px;font-weight:600">${r.passed} / ${r.checked}</span>
+        <span class="muted" style="width:90px;text-align:right">${when(r, now)}</span></a>`).join('')}</div></div>`).join('');
+    const cards = `<div class="cards">${runs.map(r => `<a class="card" href="${href(r)}">
+        <span style="display:flex;align-items:center;gap:8px">${runIcon(r)}<span class="mono">${esc(r.id)}</span><span style="flex:1"></span><span class="muted" style="font-size:12px">${when(r, now)}</span></span>
+        <span style="font-size:34px;font-weight:600;letter-spacing:-.02em">${r.passed} / ${r.checked}</span>
+        <span class="bar"><span style="width:${pct(r)}%;background:${color(r)}"></span></span>
+        <span style="font-weight:500">${esc(r.agent)}</span><span class="muted" style="font-size:13px">${esc(runMeta(r))}</span></a>`).join('')}</div>`;
+    const ranges = [['today', 'Today'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['all', 'All']];
+    return `<div class="head"><h1>Runs</h1><div role="group" aria-label="View" style="display:flex">
+        ${['list', 'cards'].map(v => `<button class="seg${V.view === v ? ' on' : ''}" aria-pressed="${V.view === v}" onclick="pickView({view: '${v}'})">${v === 'list' ? 'List' : 'Cards'}</button>`).join('')}</div></div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
+        ${ranges.map(([id, label]) => `<button class="tag${!V.from && !V.to && V.range === id ? ' on' : ''}" onclick="pickView({range: '${id}', from: '', to: ''})">${label}</button>`).join('')}
+        <span class="muted" style="font-size:13px;margin-left:8px">or between</span>
+        <input type="date" aria-label="From" value="${V.from}" onchange="pickView({from: this.value})" style="width:auto;min-height:32px;padding:2px 8px">
+        <span class="muted">–</span>
+        <input type="date" aria-label="To" value="${V.to}" onchange="pickView({to: this.value})" style="width:auto;min-height:32px;padding:2px 8px">
+        <span class="muted" style="font-size:13px">· ${runs.length} run${runs.length === 1 ? '' : 's'}</span></div>
+      ${!runs.length ? '<div class="panel"><div class="row muted">No runs in this range.</div></div>' : V.view === 'list' ? list : cards}`;
+  },
+  scenarios: () => listPage('scenarios', 'Scenarios', 'livetest scenario list', D.scenarios.map(s => [s.name, s.number,
+    `${esc(s.tags.length ? 'tag ' + s.tags.join(', ') + ' · ' : '')}${s.max_turns} turns · ${s.max_minutes} min · ${s.expect.length} check${s.expect.length === 1 ? '' : 's'} · <span title="${esc(s.prompt)}">${esc(s.prompt.slice(0, 90))}${s.prompt.length > 90 ? '…' : ''}</span>`]),
+    'No scenarios yet.'),
+  profiles: () => listPage('profiles', 'Profiles', 'livetest profile list', D.profiles.map(p => [p.name, badge(Object.keys(p.participant.attributes).length ? 'attrs'
+      : [p.participant.metadata, p.room.metadata, p.dispatch.metadata].some(m => m != null) ? 'metadata' : 'plain'), esc(brief(p))]),
+    'No profiles yet. A run without one joins as a plain participant named tester.'),
+  agents: () => listPage('agents', 'Agents', 'livetest agent list', D.agents.map(a => [a.name, badge(source(a).split(' ')[0]),
+    `<span class="mono">${esc(source(a))}</span>`]), 'No agents yet.'),
+  plugins() {
+    const active = kind => D.plugins.find(p => p.kind === kind && p.active);
+    const card = kind => {
+      const p = active(kind), provider = p ? Object.keys(D.presets).find(k => D.presets[k] === p.base_url) || LOCAL : LOCAL;
+      return `<section class="panel slot" data-kind="${kind}">
+        <span style="font-weight:600">${KIND[kind]}</span>
+        ${field('Provider', `<select name="provider" onchange="this.closest('.slot').querySelector('.base').hidden = this.value !== '${LOCAL}'">${opts([...Object.keys(D.presets).map(k => [k]), [LOCAL]], provider)}</select>`)}
+        <label class="field base"${provider === LOCAL ? '' : ' hidden'}>Base URL<input name="base_url" value="${esc(p && provider === LOCAL ? p.base_url : '')}" placeholder="http://localhost:11434/v1"></label>
+        ${field('Model', `<input name="model" value="${esc(p?.model || '')}" placeholder="${{llm: 'llama3.1:8b', stt: 'whisper-1', tts: 'tts-1'}[kind]}">`)}
+        ${kind === 'tts' ? field('Voice', `<input name="voice_id" value="${esc(p?.voice_id || '')}" placeholder="alloy">`) : ''}
+        ${field(provider === LOCAL ? 'API key (optional)' : 'API key', `<input name="key" type="password" autocomplete="off" placeholder="${p?.key ? 'saved · leave blank to keep it' : 'not needed for most local servers'}">`)}
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px"><button class="btn sm" onclick="testPlugin(this)">Test connection</button>
+          <span class="status muted" style="font-size:13px">${p ? `active: ${esc(p.name)}` : 'not set up'}</span></div>
+        ${loading('Checking that it answers…')}</section>`;
+    };
+    const saved = D.plugins.map(p => `<div class="row"><span style="width:12px;color:var(--ok)" title="${p.active ? 'active' : ''}">${p.active ? '●' : ''}</span>
+        <span class="mono" style="width:36px">${esc(p.kind)}</span><span style="width:180px;font-weight:600;overflow-wrap:anywhere">${esc(p.name)}</span>
+        <span class="grow mono muted">${esc(p.base_url)} · ${esc(p.model)}${p.voice_id ? ` · voice ${esc(p.voice_id)}` : ''} · key ${p.key ? 'set' : 'none'}</span>
+        ${p.active ? '<span class="muted">active</span>' : `<button class="btn sm" data-name="${esc(p.name)}" onclick="use(this.dataset.name)">Use</button>`}
+        <button class="btn sm" data-name="${esc(p.name)}" onclick="remove('plugins', this.dataset.name)">Remove</button></div>`).join('');
+    return `<div class="head"><h1>Plugins</h1><button class="btn primary" onclick="openAdd('plugins')">Add plugin</button></div>
+      <div class="slots">${['llm', 'stt', 'tts'].map(card).join('')}</div>
+      ${D.plugins.length ? `<div class="field" style="font-weight:600">Saved plugins<div class="panel" style="font-weight:400">${saved}</div></div>` : ''}
+      <div class="muted" style="font-size:13px;line-height:1.6">Keys are saved in <span class="mono">${esc(D.settings.env)}</span></div>
+      ${cliBar('livetest plugin add --kind llm --plugin NAME --provider openai --model gpt-4o-mini')}`;
+  },
+  settings: () => `<h1>Settings</h1><div class="panel">${[['Data', `${D.settings.db} · recordings in ${D.settings.recordings}`],
+      ['UI', `${location.host} (this machine only)`], ['Keys', `${D.settings.env} · managed in Plugins`]].map(([k, v]) =>
+      `<div class="row"><span style="width:200px;font-weight:500">${k}</span><span class="muted mono grow">${esc(v)}</span></div>`).join('')}</div>
+    ${cliBar(`livetest --db ${D.settings.db} ui serve --port ${location.port || 80}`)}`,
+  report() {  // the Report screen: what goes inside the file, measured; then Download
+    const [id] = arg, run = D.runs.find(r => r.id === id);
+    if (!run) return `<h1>Report</h1><div class="panel"><div class="row muted">No run named '${esc(id)}'.</div></div>`;
+    const one = V.scope === 'test', q = new URLSearchParams({...(one && {test: V.test}), ...(!V.rec && {recordings: 0})}).toString();
+    const enc = encodeURIComponent(id), cli = `livetest report create --run ${id}${one ? ` --test ${V.test}` : ''}${V.rec ? '' : ' --no-recordings'}`;
+    const s = D.sizes, sec = Object.fromEntries((s?.sections || []).map(x => [x.name, x]));
+    const n = (x, w) => `${x.toLocaleString('en-US')} ${w}${x === 1 ? '' : 's'}`;
+    const what = {Summary: c => `${n(c, 'test')}: verdicts, checks, latency, tokens (incl. cached), failed checks and agent errors`,
+      Conversations: c => `${n(c, 'turn event')}: what each side said, tool calls inline, what the agent’s STT heard`,
+      Timelines: c => `${n(c, 'agent event')}: agent states, reply gaps, tool calls, LiveKit's spans and timings`,
+      Logs: c => `${n(c, 'line')}, filterable by level`, 'Agent info': () => 'System prompt, tools, session options, the profile sent',
+      Recordings: c => !V.rec ? 'Left out (Include recordings is off)' : c ? `${n(c, 'stereo file')} (agent left, tester right), synced to the transcript` : 'none recorded',
+      Page: () => 'The viewer and its fonts: opens offline, no server, no internet'};
+    return `<div style="display:flex;align-items:center;gap:8px"><a href="#runs" class="muted" style="text-decoration:none">Runs</a><span class="muted">/</span>
+        <a href="/runs/${enc}" class="mono muted" style="text-decoration:none">${esc(id)}</a><span class="muted">/</span><span>Report</span></div>
+      <div style="display:flex;flex-direction:column;gap:16px;max-width:980px">
+      <h1>Report for <span class="mono" style="font-size:20px">${esc(id)}</span></h1>
+      <p class="muted" style="margin:0;line-height:1.6">One HTML file that opens offline in any browser and looks like this app. Everything below goes inside it.</p>
+      <div class="panel" style="padding:16px 18px;display:flex;flex-wrap:wrap;gap:20px;align-items:flex-end;overflow:visible">
+        <div class="field">Scope<div role="group" aria-label="Scope" style="display:flex">
+          <button class="seg${one ? '' : ' on'}" aria-pressed="${!one}" onclick="pickReport({scope: 'run'})">Whole run</button>
+          <button class="seg${one ? ' on' : ''}" aria-pressed="${one}" onclick="pickReport({scope: 'test'})">One test</button></div></div>
+        ${one ? field('Test', `<select onchange="pickReport({test: +this.value})">${opts(Array.from({length: run.tests}, (_, i) => [String(i + 1)]), String(V.test))}</select>`) : ''}
+        <label style="display:flex;align-items:center;gap:8px;min-height:36px"><input type="checkbox"${V.rec ? ' checked' : ''} onchange="pickReport({rec: this.checked})"> Include recordings</label></div>
+      <div class="panel"><div class="inc muted" style="background:var(--bar);font-size:12px;font-weight:600"><span style="width:160px">SECTION</span><span style="flex:1 1 300px">WHAT YOU GET</span><span style="width:90px;text-align:right">SIZE</span></div>
+        ${s ? s.sections.map(x => `<div class="inc" style="opacity:${x.name === 'Recordings' && !V.rec ? .5 : 1}"><span style="width:160px;font-weight:500">${x.name}</span>
+          <span class="muted" style="flex:1 1 300px;line-height:1.5">${what[x.name](x.count)}</span>
+          <span class="mono muted" style="width:90px;text-align:right">${x.name === 'Recordings' && !V.rec ? '—' : kb(x.bytes)}</span></div>`).join('')
+          : '<div class="inc muted"><span class="spin" aria-hidden="true"></span>measuring…</div>'}</div>
+      <div class="warn">The report contains the agent's system prompt${V.rec && sec.Recordings?.count ? ' and the recordings' : ''}. Anyone you send it to can read${V.rec && sec.Recordings?.count ? ' and hear' : ''} them. Keys are never included.</div>
+      <div class="panel" style="padding:16px 18px;display:flex;flex-wrap:wrap;gap:14px;align-items:center">
+        <div style="display:flex;flex-direction:column;gap:4px;flex:1 1 360px;min-width:0;overflow-wrap:anywhere"><span class="mono">./${esc(s?.file || '')}${s ? ` · about ${kb(s.bytes)}` : ''}</span><code class="mono muted">$ ${esc(cli)}</code></div>
+        <a class="btn primary" href="/api/runs/${enc}/report${q ? '?' + q : ''}" download>Download report</a></div></div>`;
+  },
+};
+
+// The first column: a scenario's number (the CLI picks by it), an agent's or profile's type.
+const badge = t => `<span class="chip" style="background:var(--hover);color:var(--sub);width:64px;justify-content:center">${esc(t)}</span>`;
+function listPage(kind, title, cli, rows, empty) {  // Scenarios, Profiles, Agents: Add opens the side drawer
+  return `<div class="head"><h1>${title}</h1><button class="btn primary" onclick="openAdd('${kind}')">Add ${kind.slice(0, -1)}</button></div>
+    <div class="panel">${rows.map(([name, first, rest]) => `<div class="row"><span class="mono muted" style="min-width:40px">${first}</span>
+      <span style="width:200px;font-weight:500;overflow-wrap:anywhere">${esc(name)}</span><span class="muted grow">${rest}</span>
+      <button class="btn sm" data-name="${esc(name)}" onclick="remove('${kind}', this.dataset.name)">Remove</button></div>`).join('')
+      || `<div class="row muted">${empty}</div>`}</div>${cliBar(cli)}`;
+}
+
+// What each page needs from the API.
+const NEEDS = {runs: ['runs', 'agents', 'plugins', 'scenarios'], scenarios: ['scenarios'], profiles: ['profiles'], agents: ['agents'],
+               plugins: ['plugins', 'presets', 'settings'], settings: ['settings'], report: ['runs']};
+
+async function show() {
+  const hash = location.hash.slice(1), [where, ...rest] = hash.split('/').map(decodeURIComponent);
+  const extra = hash.match(/^(new|jump)(?:=(.*))?$/);  // #new=<preset> (from a run page) and #jump open over Runs
+  page = extra ? 'runs' : PAGES[where] ? where : 'runs';
+  if (page === 'report' && rest.join('/') !== arg.join('/')) Object.assign(V, {scope: rest[1] ? 'test' : 'run', test: +rest[1] || 1});  // #report/<run>[/<test>]
+  arg = rest;
+  for (const a of document.querySelectorAll('nav a')) {
+    const on = a.dataset.page === (page === 'report' ? 'runs' : page);
+    a.classList.toggle('on', on);
+    a.toggleAttribute('aria-current', on);
+  }
+  document.title = `${PAGES[page]} · LiveTest`;
+  say('');
+  if (page === 'report') D.sizes = null;
+  await draw();
+  if (extra) {
+    history.replaceState(null, '', '#runs');
+    extra[1] === 'jump' ? openJump() : openRun(extra[2] && JSON.parse(decodeURIComponent(extra[2])));
+  }
+}
+
+async function draw() {
+  clearTimeout(timer);
+  const at = page;
+  try {
+    await load(...NEEDS[page]);
+    if (page !== at) return;  // the viewer moved on meanwhile
+    const h = VIEWS[page]();
+    if (h !== shown) $('page').innerHTML = shown = h;  // unchanged: leave it, so an open date picker or a typed field stays
+  } catch (e) { say(`couldn't load: ${e.message}`, true); }
+  if (page === 'runs') timer = setTimeout(draw, 1000);  // runs started in the terminal show up too
+  if (page === 'report' && !D.sizes) sizes();
+}
+const pickView = change => { Object.assign(V, change); draw(); };
+
+async function sizes() {
+  const id = arg[0], q = new URLSearchParams({...(V.scope === 'test' && {test: V.test}), ...(!V.rec && {recordings: 0})});
+  try { D.sizes = await api(`/api/runs/${encodeURIComponent(id)}/report/sizes?${q}`); } catch (e) { say(e.message, true); return; }
+  if (page === 'report' && arg[0] === id) $('page').innerHTML = shown = VIEWS.report();
+}
+const pickReport = change => { Object.assign(V, change); D.sizes = null; $('page').innerHTML = shown = VIEWS.report(); sizes(); };
+
+async function remove(kind, name) {
+  const what = kind.slice(0, -1);
+  if (!confirm(`Remove ${what} '${name}'?${['agents', 'plugins'].includes(kind) ? ' Its keys in .env go with it.' : ''}`)) return;
+  try { say((await api(`/api/${kind}/${encodeURIComponent(name)}`, {}, 'DELETE')).message); await draw(); } catch (e) { say(e.message, true); }
+}
+async function use(name) {
+  try { say((await api(`/api/plugins/${encodeURIComponent(name)}/use`, {})).message); await draw(); } catch (e) { say(e.message, true); }
+}
+
+// ---- Plugins cards: Test connection checks the card; if it answers, it's saved and active ----
+
+function slug(model, kind) {  // a plugin named after its model, free of every saved name (and of a-b vs a_b sharing a key)
+  let base = model.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z]+/, '').slice(0, 58) || kind;
+  const taken = new Set(D.plugins.map(p => p.name.replace(/\W/g, '_').toUpperCase())), free = n => !taken.has(n.replace(/\W/g, '_').toUpperCase());
+  for (let i = 2, name = base; ; name = `${base}-${i++}`) if (free(name)) return name;
+}
+async function testPlugin(button) {
+  const card = button.closest('.slot'), kind = card.dataset.kind, f = Object.fromEntries([...card.querySelectorAll('[name]')].map(e => [e.name, e.value.trim()]));
+  const p = D.plugins.find(x => x.kind === kind && x.active), status = card.querySelector('.status');
+  const base_url = f.provider === LOCAL ? f.base_url : D.presets[f.provider];
+  const set = (t, cls) => { status.textContent = t; status.className = `status ${cls}`; };
+  if (!base_url || !f.model) return set(!base_url ? 'enter the base URL' : 'enter the model', 'bad');
+  card.classList.add('busy'); card.inert = true;
+  set('', 'muted');
+  try {
+    if (p && !f.key && p.base_url === base_url && p.model === f.model && (p.voice_id || '') === (f.voice_id || '')) {
+      set('✓ ' + (await api(`/api/plugins/${encodeURIComponent(p.name)}/check`, {})).message, 'good');  // the saved one, unchanged
+    } else {
+      const name = slug(f.model, kind);
+      const said = (await api('/api/plugins', given({name, kind, base_url, model: f.model, voice_id: f.voice_id, key: f.key,
+        key_from: p && !f.key && p.base_url === base_url ? p.name : null}))).message;
+      if (p) await api(`/api/plugins/${encodeURIComponent(name)}/use`, {});
+      await draw();
+      say(`${said}${p ? `; it's the active ${kind} now` : ''}`);
+    }
+  } catch (e) { set(e.message, 'bad'); }
+  card.classList.remove('busy'); card.inert = false;
+}
+
+// ---- the side drawer: Add a scenario, profile or agent ----
+
+const FORMS = {
+  scenarios: ["livetest scenario add --scenario NAME --prompt '...' [--tag T] [--tool-called NAME k=v]", () => [
+    field('Name', input('name', 'required')), field('Tags (comma-separated)', input('tags', 'placeholder="booking, billing"')),
+    field('Prompt: the tester LLM’s whole system prompt, sent as written', area('prompt', 'You are an impatient customer who wants to move your Tuesday appointment to Friday. Reply with one short turn.'), true),
+    field('Max turns', input('max_turns', 'type="number" min="1" placeholder="10"')), field('Max minutes', input('max_minutes', 'type="number" min="0.1" step="any" placeholder="5"')),
+    field('Expect these tools called, one per line: name key=value …', area('tool_called', 'reschedule day="friday"'), true),
+    field('Expect these tools never called (with these args, if given)', area('tool_not_called', 'cancel_booking'), true),
+    field('Reply latency p95 limit (ms)', input('p95_ms', 'type="number" min="1"')), field('Reply latency p99 limit (ms)', input('p99_ms', 'type="number" min="1"')),
+    `<label class="wide" style="display:flex;align-items:center;gap:8px"><input type="checkbox" name="no_tool_errors">Expect no tool call to fail</label>`]],
+  profiles: ['livetest profile add --profile NAME [--attribute k=v] [--metadata JSON]', () => [
+    field('Name', input('name', 'required')), field('Participant identity', input('identity', 'placeholder="tester"')),
+    field('Participant name', input('participant_name', 'placeholder="Priya"')),
+    field('Participant attributes, one per line: key=value', area('attributes', 'plan=pro\nlang=en'), true),
+    field('Participant metadata (JSON or text): participant.metadata', input('metadata', 'placeholder=\'{"user_id": 42}\''), true),
+    field('Room metadata: ctx.room.metadata', input('room_metadata', 'placeholder=\'{"tenant": "acme"}\'')),
+    field('Dispatch metadata: ctx.job.metadata', input('dispatch_metadata', 'placeholder=\'{"job": 1}\''))]],
+  agents: ['livetest agent add --name NAME --sandbox ID | --endpoint URL | --url URL', () => [
+    field('Name: its LiveKit agent_name', input('name', 'required'), true),
+    field('How LiveTest gets a token', `<select name="source" onchange="this.form.querySelector('.secrets').hidden = this.value !== 'url'; this.form.querySelector('.where').hidden = this.value === 'none'">${opts(
+      [['sandbox', 'Sandbox ID'], ['endpoint', 'Token endpoint (https://…)'], ['url', 'LiveKit server URL + API key and secret'], ['none', 'None: pass a token each run']])}</select>`, true),
+    `<label class="field wide where">Sandbox ID, endpoint or server URL${input('where', 'placeholder="my-sandbox-id"')}</label>`,
+    `<div class="secrets wide grid" hidden>${field('LiveKit API key', input('key', 'type="password" autocomplete="off"'))}${field('API secret', input('secret', 'type="password" autocomplete="off"'))}
+      <span class="muted wide" style="font-size:13px">Saved in .env next to the database, never in it.</span></div>`,
+    `<span class="muted wide" style="font-size:13px">LiveTest joins a fresh room and waits up to 30 s for the agent; it saves nothing if the agent never comes.</span>`]],
+  plugins: ['livetest plugin add --kind llm|stt|tts --plugin NAME --provider P | --base-url URL --model MODEL', () => [
+    field('Kind', `<select name="kind">${opts([['llm', 'LLM'], ['stt', 'STT'], ['tts', 'TTS']])}</select>`), field('Name', input('name', 'required')),
+    field('Provider', `<select name="provider" onchange="this.form.base_url.value = D.presets[this.value] || ''">${opts(Object.keys(D.presets).map(p => [p]), null, 'my own server (base URL)')}</select>`),
+    field('Base URL', input('base_url', 'required placeholder="http://localhost:11434/v1"')), field('Model', input('model', 'required')),
+    field('Voice (TTS)', input('voice_id', 'placeholder="alloy"')), field('API key', input('key', 'type="password" autocomplete="off"'), true)]],
+};
+// What each form sends: the model's fields, as the CLI's flags build them.
+const BODY = {
+  scenarios: f => given({name: f.name, prompt: f.prompt, tags: f.tags.split(',').map(t => t.trim()).filter(Boolean),
+    max_turns: f.max_turns && +f.max_turns, max_minutes: f.max_minutes && +f.max_minutes,
+    expect: [...['tool_called', 'tool_not_called'].flatMap(type => lines(f[type]).map(l => { const [name, ...args] = l.split(/\s+/); return {type, name, args: kv(args, value)}; })),
+             ...(f.no_tool_errors ? [{type: 'no_tool_errors'}] : []),
+             ...(f.p95_ms || f.p99_ms ? [given({type: 'latency', p95_ms: f.p95_ms && +f.p95_ms, p99_ms: f.p99_ms && +f.p99_ms})] : [])]}),
+  profiles: f => ({name: f.name, room: given({metadata: f.room_metadata && meta(f.room_metadata)}),
+    participant: given({identity: f.identity, name: f.participant_name, metadata: f.metadata && meta(f.metadata), attributes: kv(lines(f.attributes), String)}),
+    dispatch: given({metadata: f.dispatch_metadata && meta(f.dispatch_metadata)})}),
+  agents: f => {
+    if (f.source !== 'none' && !f.where.trim()) throw new Error('enter the sandbox ID, token endpoint or server URL, or pick None');
+    return {name: f.name, ...(f.source !== 'none' && {[f.source]: f.where.trim()}), ...(f.source === 'url' && {key: f.key, secret: f.secret})};
+  },
+  plugins: f => given({name: f.name, kind: f.kind, base_url: f.base_url.trim(), model: f.model.trim(), voice_id: f.voice_id.trim(), key: f.key}),
+};
+
+const drawerHead = title => `<div class="head"><h2 style="margin:0;font-size:18px;font-weight:600">${title}</h2><button type="button" class="btn sm" onclick="$('drawer').close()" aria-label="Close">✕</button></div>`;
+function openAdd(kind) {
+  const [cli, fields] = FORMS[kind], what = kind.slice(0, -1);
+  if (page !== kind) location.hash = '#' + kind;
+  $('drawer').innerHTML = `<form onsubmit="return add(event, '${kind}')">${drawerHead(`Add ${what}`)}
+    <div class="grid">${fields().join('')}</div>
+    <code class="mono muted" style="overflow-wrap:anywhere">$ ${esc(cli)}</code>
+    <div class="bad" role="alert"></div>
+    ${loading({agents: 'Checking that the agent answers: joining a fresh room, up to 30 s…', plugins: 'Checking that it answers: one streamed call…'}[kind] || 'Saving…')}
+    <div style="display:flex;gap:8px"><button class="btn primary" type="submit">Add ${what}</button><button class="btn" type="button" onclick="$('drawer').close()">Cancel</button></div></form>`;
+  $('drawer').showModal();
+}
+async function add(ev, kind) {
+  ev.preventDefault();
+  const form = ev.target, error = form.querySelector('[role=alert]');
+  form.classList.add('busy'); form.inert = true;
+  error.textContent = '';
+  try {
+    const said = (await api('/api/' + kind, BODY[kind](Object.fromEntries(new FormData(form))))).message;
+    $('drawer').close();
+    await draw();
+    say(said);
+  } catch (e) { error.textContent = e.message; }
+  form.classList.remove('busy'); form.inert = false;
+  return false;
+}
+
+// ---- the New run drawer: what `run start` takes, its plan as you pick; the run starts in the UI's process ----
+
+async function openRun(preset) {
+  try { await load('runs', 'agents', 'profiles', 'scenarios', 'plugins', 'settings'); } catch (e) { say(e.message, true); return; }
+  const title = {failed: 'Re-run failed scenarios', again: 'Run again, same settings'}[preset?.title] || 'New run';
+  const plugin = kind => field(`Tester ${kind.toUpperCase()}`, `<select name="${kind}">${opts(D.plugins.filter(p => p.kind === kind && !p.active).map(p => [p.name]),
+    null, `active: ${D.plugins.find(p => p.kind === kind && p.active)?.name || 'none yet'}`)}</select>`);
+  const tags = [...new Set(D.scenarios.flatMap(s => s.tags))];
+  const body = !D.agents.length || !D.scenarios.length
+    ? `<p class="muted">A run needs an agent and a scenario first: <a href="#agents" onclick="$('drawer').close()">add an agent</a>, <a href="#scenarios" onclick="$('drawer').close()">add a scenario</a>.</p>`
+    : `<div class="grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        ${field('Agent', `<select name="agent">${opts(D.agents.map(a => [a.name]), preset?.agent)}</select>`)}
+        ${field('Profile', `<select name="profile">${opts(D.profiles.map(p => [p.name]), preset?.profile, '(none)')}</select>`)}
+        ${field('Mode', `<select name="mode">${opts([['text'], ['voice']], preset?.mode)}</select>`)}
+        ${field('Run id (blank = next number)', input('run', `placeholder="${nextId()}"`))}
+        <div class="token wide">${field('Token (this agent has no token source, so it runs one test)', input('token', 'type="password" autocomplete="off"'))}</div></div>
+      <div class="field">Scenarios
+        ${tags.length ? `<div style="display:flex;flex-wrap:wrap;gap:6px;font-weight:400">${['all', ...tags].map(t => `<button type="button" class="tag${t === 'all' ? ' on' : ''}" data-tag="${esc(t)}" onclick="filterTag(this)">${esc(t)}</button>`).join('')}</div>` : ''}
+        <div class="picks">${D.scenarios.map(s => `<div class="pick" data-tags="${esc(JSON.stringify(s.tags))}"><input type="checkbox" name="pick" value="${s.number}" id="pick-${s.number}"${preset?.picks?.[s.name] ? ' checked' : ''}>
+          <label for="pick-${s.number}"><span class="mono muted" style="width:22px">${s.number}</span><span>${esc(s.name)}</span></label>${score(s.last) || ''}
+          <label class="muted" style="flex:none;gap:4px;font-size:12px">×<input type="number" min="1" value="${preset?.picks?.[s.name] || 1}" name="times-${s.number}" aria-label="repeat ${esc(s.name)}"></label></div>`).join('')}</div></div>
+      <details><summary>More options</summary><div class="grid" style="margin-top:12px">
+        ${field('In parallel', input('parallel', 'type="number" min="1" value="4"'))}
+        ${plugin('llm')}
+        <div class="voice" style="display:contents">${plugin('stt')}${plugin('tts')}
+          <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" name="recordings" checked>Record each test</label></div>
+        ${field('The tester opens with (blank: the agent opens; a test ends if it doesn’t greet within 10 s)', input('opening', 'placeholder="Hi, I need to reschedule"'), true)}</div></details>
+      <div class="plan mono" id="plan"></div>`;
+  $('drawer').innerHTML = `<form id="runform" onsubmit="return startRun(event)" oninput="syncRun()" onchange="syncRun()">${drawerHead(title)}${body}
+    <div class="bad" id="runmsg" role="alert"></div>
+    ${loading('Starting: checking the agent answers…')}
+    <div style="display:flex;align-items:center;gap:8px"><button class="btn primary" type="submit"${D.agents.length && D.scenarios.length ? '' : ' disabled'}>Start run</button>
+      <button class="btn" type="button" onclick="$('drawer').close()">Cancel</button></div></form>`;
+  syncRun();
+  $('drawer').showModal();
+}
+const nextId = () => String(Math.max(0, ...D.runs.filter(r => /^\d+$/.test(r.id)).map(r => +r.id)) + 1);  // as store.next_run_id
+function filterTag(button) {
+  for (const t of button.parentElement.children) t.classList.toggle('on', t === button);
+  const tag = button.dataset.tag;
+  for (const p of $('runform').querySelectorAll('.pick')) p.hidden = tag !== 'all' && !JSON.parse(p.dataset.tags).includes(tag);  // ticks stay
+}
+
+function runBody() {
+  const f = $('runform'), v = Object.fromEntries(new FormData(f));
+  const scenario = [...f.querySelectorAll('input[name=pick]:checked')].map(c => {
+    const times = +f.elements[`times-${c.value}`].value || 1;
+    return times > 1 ? `${c.value}x${times}` : c.value;
+  });
+  return {name: v.agent, scenario, profile: v.profile || null, voice: v.mode === 'voice', run: v.run.trim() || null, parallel: +v.parallel || 4,
+          plugins: {llm: v.llm || null, stt: v.stt || null, tts: v.tts || null}, recordings: !!v.recordings,
+          start_conversation: v.opening || null, token: v.token || null};
+}
+
+function syncRun() {  // show only what applies; the plan, and the same run as a command
+  const f = $('runform');
+  if (!f.elements.agent) return;
+  const b = runBody(), agent = D.agents.find(a => a.name === b.name), one = !(agent.sandbox || agent.endpoint || agent.url);
+  f.querySelector('.voice').hidden = !b.voice;
+  f.querySelector('.token').hidden = !one;
+  const picked = [...f.querySelectorAll('input[name=pick]:checked')], id = b.run || nextId();
+  const tests = one ? Math.min(1, picked.length) : picked.reduce((n, c) => n + (+f.elements[`times-${c.value}`].value || 1), 0);
+  const sep = D.settings.recordings.includes('\\') ? '\\' : '/';  // Windows paths
+  const llm = b.plugins.llm || D.plugins.find(p => p.kind === 'llm' && p.active)?.name || 'none yet';
+  const q = s => /^[\w.:\/-]+$/.test(s) ? s : `"${s.replaceAll('"', '\\"')}"`;
+  const cli = 'livetest run start --name ' + q(b.name) + ' --scenario ' + (b.scenario.join(' ') || '…')
+    + (b.profile ? ` --profile ${q(b.profile)}` : '') + (b.run ? ` --run ${q(b.run)}` : '') + (b.parallel !== 4 ? ` --parallel ${b.parallel}` : '')
+    + (b.plugins.llm ? ` --llm ${q(b.plugins.llm)}` : '')
+    + (b.voice ? ' --voice' + (b.plugins.stt ? ` --stt ${q(b.plugins.stt)}` : '') + (b.plugins.tts ? ` --tts ${q(b.plugins.tts)}` : '') + (b.recordings ? '' : ' --no-recordings') : '')
+    + (b.start_conversation ? ` --start-conversation ${q(b.start_conversation)}` : '') + (b.token ? ' --token <token>' : '');  // never the token itself
+  $('plan').innerHTML = `<div>run id: ${esc(id)}</div>
+    <div>${esc(b.name)}: ${picked.length} scenario${picked.length === 1 ? '' : 's'}, ${tests} test${tests === 1 ? '' : 's'}, ${b.voice ? 'voice' : 'text'} mode, ${b.parallel} in parallel${b.profile ? `, profile ${esc(b.profile)}` : ''}, tester llm ${esc(llm)}</div>
+    <div>recording: ${b.voice ? (b.recordings ? `on (${esc(D.settings.recordings + sep + 'run-' + id)}, one file per test)` : 'off') : 'n/a in text mode'}</div>
+    <div>opens: ${b.start_conversation ? `tester ("${esc(b.start_conversation)}")` : 'agent'}</div>
+    <code class="muted" style="margin-top:6px;white-space:pre-wrap">$ ${esc(cli)}</code>`;
+}
+
+async function startRun(ev) {
+  ev.preventDefault();
+  const form = $('runform');
+  if (!form.elements.agent) return false;
+  const body = runBody();
+  if (!body.scenario.length) { $('runmsg').textContent = 'tick at least one scenario'; return false; }
+  // Grey everything out while the server checks the agent answers (its first token fetch) and starts the run.
+  form.classList.add('busy'); form.inert = true;
+  $('runmsg').textContent = '';
+  try {
+    location.href = '/runs/' + encodeURIComponent((await api('/api/runs', body)).run);
+    return false;
+  } catch (e) { $('runmsg').textContent = e.message; }
+  form.classList.remove('busy'); form.inert = false;
+  return false;
+}
+
+// ---- Jump to (Ctrl K) ----
+
+async function openJump() {
+  try { await load('runs', 'scenarios', 'agents', 'profiles'); } catch (e) { say(e.message, true); return; }
+  $('q').value = '';
+  drawJump();
+  $('jump').showModal();
+  $('q').focus();
+}
+function drawJump() {
+  const q = $('q').value.trim().toLowerCase(), go = h => `location.href='${h}';$('jump').close()`;
+  const items = [
+    ...[...D.runs].reverse().map(r => ['run', r.id, LIVE.includes(r.status) ? 'live' : `${r.passed} / ${r.checked}`, go(`/runs/${encodeURIComponent(r.id)}`)]),
+    ...D.scenarios.map(s => ['scenario', `${s.number} ${s.name}`, s.tags.join(', '), go('#scenarios')]),
+    ...D.agents.map(a => ['agent', a.name, source(a), go('#agents')]), ...D.profiles.map(p => ['profile', p.name, '', go('#profiles')]),
+    ['action', 'New run', '', "$('jump').close();openRun()"], ['action', 'Plugins', 'LLM, STT, TTS', go('#plugins')], ['action', 'Settings', '', go('#settings')]];
+  $('pal').innerHTML = items.filter(([kind, label]) => !q || label.toLowerCase().includes(q) || kind.includes(q)).slice(0, 8).map(([kind, label, hint, act]) =>
+    `<button class="pal" onclick="${esc(act)}"><span class="chip" style="background:var(--hover);color:var(--muted);width:70px;justify-content:center">${kind}</span>
+      <span class="mono">${esc(label)}</span><span class="muted" style="font-size:13px">${esc(hint)}</span></button>`).join('') || '<div class="pal muted">nothing matches</div>';
+}
+addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); openJump(); } });
+
+addEventListener('hashchange', show);
+show();
+</script>
+</body>
+</html>

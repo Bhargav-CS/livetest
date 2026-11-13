@@ -1,17 +1,16 @@
-"""What a finished test is judged on: built-ins (silent, loops, finished in time) plus the scenario's `expect`; and what
-it used.
+"""What a finished test is judged on: the scenario's own `expect` only (tool checks, latency); and what it used.
 
 Pure: reads a result's events, no LiveKit. Each outcome shows what was expected and what happened, passes too.
 """
 
 import json
 import math
-from difflib import SequenceMatcher
 
 from livetest.runtime.models import Latency, NoToolErrors, Scenario, ToolCheck
 
-# The agent must start replying within this many seconds of a tester turn; provider errors (4xx / 5xx) it retries
-# past inside that don't count. The runner ends the test on a turn that misses it.
+# The runner ends a test when the agent doesn't start replying (or greeting) within this many seconds of a tester turn;
+# provider errors (4xx / 5xx) it retries past inside that don't count. The test ends no_reply / no_greeting and fails
+# (store.finish_result).
 REPLY_S = 10
 
 
@@ -35,36 +34,61 @@ def usage(events) -> dict:
     return {"agent": agent, "tester": tester}
 
 
-def evaluate(scenario: Scenario, ended: str, events) -> list[dict]:
-    """`events` as `store.events` gives them: (ts, source, type, data), in order. Run only on `done` results."""
-    turns, replies, calls, outputs = [], [], [], {}
-    for ts, _, kind, data in events:
-        ev = data.get(kind) or {}
-        if kind == "tester_turn":
-            turns.append({"said": data["text"], "at": ts, "gap": None})
-        elif kind == "agent_state_changed" and ev.get("new_state") == "AS_SPEAKING" and turns and turns[-1]["gap"] is None:
-            # tester_turn's ts: text sent (text mode), or the tester done speaking (voice)
-            turns[-1]["gap"] = ts - turns[-1]["at"]
-        elif kind == "conversation_item_added" and (m := ev["item"].get("message", {})).get("role") == "ASSISTANT":
-            replies.append(" ".join(c.get("text", "") for c in m.get("content", [])))
-        elif kind == "function_tools_executed":
-            calls += ev.get("function_calls", [])
-            outputs |= {o["call_id"]: o for o in ev.get("function_call_outputs", [])}
+def _started_reply(kind: str, data: dict) -> bool:
+    ev = data.get(kind) or {}
+    return (kind == "agent_state_changed" and ev.get("new_state") == "AS_SPEAKING"
+            or kind == "conversation_item_added" and ev.get("item", {}).get("message", {}).get("role") == "ASSISTANT")
+
+
+def replies(events) -> list[dict]:
+    """Each tester turn the agent was to answer, {turn, at, gap} in s on the tester's own clock; gap None when no reply
+    started before the tester's next turn or the end. `turn` counts every tester_turn from 1.
+    Voice: the tester stopped speaking → it heard the agent start after that (its VAD, as the runner waits on it; a
+    tester_heard item only comes once the agent finishes, so a reply cut off by the test's end has none). Text: the line sent → the
+    agent's speaking state (or, with no TTS, its words) arriving. Not graded: a turn the agent cut off (interrupted;
+    it was talking already and may not have heard it), and one with no reply where REPLY_S hadn't passed before the
+    next turn or the end (e.g. the tester's "bye" and the agent hanging up; a no_reply ending always waited REPLY_S)."""
+    said = [(i, ts, d) for i, (ts, _, kind, d) in enumerate(events) if kind == "tester_turn"]
+    heard = [ts for ts, _, kind, d in events if kind == "tester_user_state_changed" and d.get("new_state") == "speaking"]
+    end = max((e[0] for e in events), default=0)
+    # Voice: the tester hears nothing after its session closes (tester_closed); livetest's usage wait comes after.
+    closed = max((ts for ts, source, kind, _ in events if source == "tester" and kind != "tester_usage"), default=end)
+    out = []
+    for n, (i, ts, d) in enumerate(said, 1):
+        if d.get("interrupted"):
+            continue
+        j, until, nxt = said[n] if n < len(said) else (len(events), end, {})
+        m = d.get("metrics", {})
+        if "stopped_speaking_at" in m:  # voice
+            until = nxt.get("metrics", {}).get("started_speaking_at", until) if nxt else closed
+            start = m["stopped_speaking_at"]
+            at = min((h for h in heard if start < h < until), default=None)  # earlier: its previous reply finishing
+        else:  # text; the next tester turn comes only after the agent's whole reply
+            start, at = ts, next((t for t, _, kind, e in events[i + 1:j] if _started_reply(kind, e)), None)
+        if at is not None or until - start >= REPLY_S:
+            out.append({"turn": n, "at": start, "gap": None if at is None else at - start})
+    return out
+
+
+def rank(gaps: list[float | None], q: int) -> int | None:
+    """The q-th percentile in ms, nearest rank (with under 20 turns, p95 is the slowest). An unanswered turn (None)
+    ranks slowest; None if it's the one picked, or no turns."""
+    ranked = sorted(math.inf if g is None else g for g in gaps)
+    v = ranked[math.ceil(q / 100 * len(ranked)) - 1] if ranked else math.inf
+    return None if v == math.inf else round(v * 1000)
+
+
+def evaluate(scenario: Scenario, events) -> list[dict]:
+    """The scenario's own checks, nothing of livetest's. `events` as `store.events` gives them: (ts, source, type,
+    data), in order. Run only on `done` results."""
+    calls, outputs, out = [], {}, []
+    for _, _, kind, data in events:
+        if kind == "function_tools_executed":
+            calls += data[kind].get("function_calls", [])
+            outputs |= {o["call_id"]: o for o in data[kind].get("function_call_outputs", [])}
     calls = [{"name": c["name"], "args": _args(c.get("arguments")), "output": outputs.get(c["call_id"], {}).get("output"),
               "error": outputs.get(c["call_id"], {}).get("is_error", False)} for c in calls]
-
-    unanswered = (["(the agent's greeting)"] if ended == "no_greeting" else []) + [
-        t["said"] for t in turns if t["gap"] is None or t["gap"] > REPLY_S]
-    # ponytail: 90% alike back to back catches word-for-word loops; v0.2 likely wants a semantic or windowed rule
-    loops = [[a, b] for a, b in zip(replies, replies[1:]) if a and SequenceMatcher(None, a, b).ratio() >= 0.9]
-    out = [
-        {"check": "silent", "passed": not unanswered, "expected": f"a reply to every tester turn within {REPLY_S} s",
-         "actual": unanswered},
-        {"check": "loops", "passed": not loops, "expected": "no reply repeating the one before", "actual": loops},
-        {"check": "finished_in_time", "passed": ended != "max_minutes",
-         "expected": f"ends within {scenario.max_minutes} min", "actual": ended},
-    ]
-    gaps = sorted(t["gap"] for t in turns if t["gap"] is not None)
+    gaps = [r["gap"] for r in replies(events)]
     for c in scenario.expect:
         if isinstance(c, ToolCheck):
             hits = [x for x in calls if x["name"] == c.name]
@@ -76,8 +100,7 @@ def evaluate(scenario: Scenario, ended: str, events) -> list[dict]:
             out.append({"check": c.type, "passed": not errors, "expected": "no tool errors", "actual": errors})
         elif isinstance(c, Latency):
             want = c.model_dump(exclude={"type"}, exclude_none=True)  # {"p95_ms": 1500, ...}
-            # Nearest rank: with under 20 turns, p95 is the slowest turn.
-            got = {k: round(gaps[math.ceil(int(k[1:3]) / 100 * len(gaps)) - 1] * 1000) if gaps else None for k in want}
-            out.append({"check": c.type, "passed": bool(gaps) and all(got[k] <= v for k, v in want.items()),
+            got = {k: rank(gaps, int(k[1:3])) for k in want}  # None: that turn got no reply
+            out.append({"check": c.type, "passed": all(got[k] is not None and got[k] <= v for k, v in want.items()),
                         "expected": want, "actual": got})
     return out

@@ -205,7 +205,7 @@ def test_terminal_prompts_for_missing(run, path, monkeypatch):
 
 def test_profile_add_list_rm(run, path, capsys):
     assert run("profile", "add", "--profile", "pro-user", "--participant-name", "Priya",
-               "--attribute", "plan=pro", "--attribute", "seats=42",
+               "--attribute", "plan=pro", "--attribute", "seats = 42",  # spaces around = are trimmed, as in the UI
                "--metadata", '{"user_id": 42}', "--room-metadata", "acme",
                "--dispatch-metadata", '{"job": 1}') == 0
     p = saved(path, Profile)["pro-user"][1]
@@ -347,18 +347,23 @@ def test_plugin_add_prompts_or_fails(run, path, reachable, monkeypatch):
     assert not (path.parent / ".env").exists()
 
 
-def test_init_offers_an_agent_then_a_tester_llm(run, path, reachable, monkeypatch, capsys):
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    assert run("init") == 0 and active(path) == {} and saved(path, Agent) == {}  # scripts are told, not asked
-    assert "agent add -h" in capsys.readouterr().out
-    answers = iter(["y", "ALIVE", "sb-1",  # agent offer, name, source
-                    "y", "local", "http://localhost:8000/v1", "qwen"])  # LLM offer, name, URL, model
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
-    monkeypatch.setattr("getpass.getpass", lambda _: "")
-    assert run("init") == 0
-    assert saved(path, Agent)["ALIVE"][1].sandbox == "sb-1" and active(path) == {"llm": "local"}
-    assert run("init") == 0  # has both now: asks nothing (answers are used up)
+def test_init_says_whats_next(run, path, capsys):
+    """The install script runs init: it asks nothing and starts nothing, and names what's still missing."""
+    def said():
+        assert run("init") == 0
+        return capsys.readouterr().out
+    first = said()
+    assert first.startswith(f"livetest is set up: {path}\n\nNext, use the web UI:\n  livetest ui show\nor the terminal:\n")
+    assert [line.split()[1] for line in first.splitlines()[5:]] == ["agent", "plugin", "scenario", "run"]
+    with closing(store.connect(path)) as db:
+        store.add(db, Agent(name="bot", sandbox="sb"))
+        store.add(db, Plugin(name="p", base_url="http://x/v1", model="m"))
+        store.use(db, "p")
+    assert [line.split()[1] for line in said().splitlines()[5:]] == ["scenario", "run"]  # done steps drop out
+    with closing(store.connect(path)) as db:
+        store.add(db, Scenario(name="s", prompt="p"))
+        store.start_run(db, "1", "bot", None, [])
+    assert said().endswith("Everything is set up. See your runs: livetest ui show, or livetest run list\n")
 
 
 @pytest.fixture
@@ -396,8 +401,8 @@ def test_run_shows_usage(run, ready, monkeypatch, capsys):
     capsys.readouterr()
     assert run("run", "start", "--name", "bot", "--scenario", "1-2", "-y") == 0
     out = capsys.readouterr().out
-    assert out.count("tokens agent 900 in (512 cached) / 40 out, tester 250 in / 12 out") == 2
-    assert "tokens agent 1800 in (1024 cached) / 80 out, tester 500 in / 24 out" in out
+    assert out.count("tokens as reported by LiveKit: agent 900 in (512 cached) / 40 out, tester 250 in / 12 out") == 2
+    assert "tokens as reported by LiveKit: agent 1800 in (1024 cached) / 80 out, tester 500 in / 24 out" in out
     assert json.loads(listed(run, capsys, "--run", "latest")[0]["usage"]) == USAGE
 
 
@@ -564,8 +569,8 @@ def test_last_agent_error_under_a_failed_verdict(run, path, capsys):
         for n in (bad, good):
             for msg in ("429 rate limit", "tts_error: no audio frames\nwere pushed"):
                 store.event(db, n, "agent", "error", {"error": {"message": msg}})
-        store.finish_result(db, bad, "done", "no_reply", [{"check": "silent", "passed": False}])
-        store.finish_result(db, good, "done", "max_turns", [{"check": "silent", "passed": True}])
+        store.finish_result(db, bad, "done", "no_reply", [{"check": "tool_called", "passed": False}])
+        store.finish_result(db, good, "done", "max_turns", [{"check": "tool_called", "passed": True}])
     capsys.readouterr()
     assert run("run", "list", "--run", "r") == 0
     out = capsys.readouterr().out

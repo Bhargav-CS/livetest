@@ -56,7 +56,7 @@ curl -LsSf https://raw.githubusercontent.com/Bhargav-CS/livetest/main/install.sh
 irm https://raw.githubusercontent.com/Bhargav-CS/livetest/main/install.ps1 | iex          # Windows
 ```
 
-- Both scripts install uv if it's missing, then run `uv tool install git+https://github.com/Bhargav-CS/livetest@<tag>`.
+- Both scripts install uv if it's missing, then run `uv tool install git+https://github.com/Bhargav-CS/livetest@<tag>`, then `livetest init`, which prints the next steps: the web UI (`livetest ui show`) or the terminal commands.
 - uv downloads its own Python 3.13, so the user needs neither Python nor pip.
 - winget needs a real installer or binary (see "Tech stack"), so it comes later.
 
@@ -76,7 +76,7 @@ profile  (who the user is)                ─┘
 
 ```
 livetest                                   overview, grouped by purpose, plus "start here"          ✓
-livetest init                              set up: DB, keys; starts the UI in the background         ✓ (DB only)
+livetest init                              set up the DB, then say what's next (the install runs it)  ✓
 livetest doctor                            check the setup, fix common problems
 livetest uninstall                         (later)
 
@@ -86,7 +86,7 @@ livetest profile  add | list | remove                --profile <profile>
 livetest plugin   add | list | remove | use          --plugin <plugin>   --kind llm|stt|tts  ✓
 
 livetest run      start | list | stop | logs         --name <agent_name> --scenario <selection> [--profile P]
-livetest ui       show | serve [--port] | stop
+livetest ui       show | serve [--port] | stop                                                    ✓
 livetest report   create                             --run <run|latest> [--test N] [--output FILE]
 ```
 
@@ -115,8 +115,8 @@ livetest run stop --run <run> [--test N] [-y]
 - **Stop** goes through the DB: `run stop` marks running tests `stopping` and queued ones `stopped`; each running test checks its row every second and ends cleanly, keeping what it recorded. The UI stops the same way, and so does Ctrl+C in `run start`. In `run logs` Ctrl+C only stops following.
 - **Later: `run start --detach`** (user, 2026-11-12): hands the run to a background livetest process and returns at once; `run logs` / `run list` / `run stop` work on it as they do now. Foreground stays the default, since CI needs the exit code. Runs started from the UI (module 11) already live in its server process.
 - **A run's status comes from its tests:** running while any is queued or running, then stopping, stopped (any stopped) or done.
-- **The agent must start each reply within 10 s** (`checks.REPLY_S`). Provider errors (4xx / 5xx) it retries past don't fail a test; they're counted per test (agent errors). A turn with no reply in time fails the built-in `silent` check and ends the test (`no_reply`).
-- **Who opens** (user, 2026-11-12): the agent, unless `--start-conversation TEXT`, which the tester says exactly as written. The tester replies to a greeting already in the agent's history, or (in voice) hears a live one out first. An agent that doesn't greet within 10 s ends the test `no_greeting`, which fails `silent`. livetest never writes a tester line itself.
+- **The agent must start each reply within 10 s** (`checks.REPLY_S`). Provider errors (4xx / 5xx) it retries past don't fail a test; they're counted per test (agent errors). A turn with no reply in time ends the test (`no_reply`) and fails it (user, 2026-11-13).
+- **Who opens** (user, 2026-11-12): the agent, unless `--start-conversation TEXT`, which the tester says exactly as written. The tester replies to a greeting already in the agent's history, or (in voice) hears a live one out first. An agent that doesn't greet within 10 s ends the test `no_greeting` and fails it. livetest never writes a tester line itself.
 - **`run logs` labels the conversation** `tester:`, `agent_<name>:` and `agent_<name>_heard:` (what the agent took in: an echo in text mode, its STT in voice). Voice mode adds `tester_heard:` (the tester's STT), so both sides' word errors show.
 
 - `run start` needs `--name` and `--scenario`, so nothing runs by accident. `--scenario all` must be typed.
@@ -193,9 +193,10 @@ The model shape, as stored in the DB and accepted by the CLI and UI. The UI's fo
 
 ### Tests, checks and limits (decided 2026-11-08)
 
-- **A test is judged on metrics, not an LLM.** Defaults are built in. Users set or override the thresholds. More check types get added from user feedback.
-  - **Built-in defaults, always on:** the agent never replies or goes silent; the agent loops (repeats itself); the agent never joins.
-  - **User-set:** the scenario must finish within N minutes; reply latency p95/p99 limits; `tool_called` / `tool_not_called` (with args) / `no_tool_errors`.
+- **A test is judged only on the checks its scenario sets; livetest adds none of its own** (user, 2026-11-13). It collects and shows; a test with no failed check passes, unless it ended `no_reply` / `no_greeting`, which fail it.
+  - **v0.1:** `tool_called` / `tool_not_called` (with args), `no_tool_errors`, reply latency p95/p99 limits.
+  - **Reported, never checked:** the `max_minutes` limit and the agent leaving. A test that never joined or errored is a status, not a check.
+  - **Removed from v0.1, planned with the LLM judge in v0.2:** the built-in loops (repeated replies) and finished-in-time checks. The 10 s reply rule stays, as `no_reply`.
   - **No LLM judge in v0.1.** Most users will drive livetest from Claude, which can judge for them. A judge module may come later.
 - **Tool checks show what happened, not just pass/fail:** the expected call and the actual call side by side (name, args, output), so the tester sees "right tool, wrong args" directly, on passes as well as failures.
 - **How a test ends:** `max_turns`, `max_minutes`, the agent ending the session, or the user pressing **Stop** (on one test or the whole run). Stop ends the conversation cleanly and keeps everything recorded so far; the result is marked **"stopped by user"**, with no pass or fail.
@@ -261,17 +262,17 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
 2. **Bring your own keys**
    - [x] Tester STT / TTS through any OpenAI-compatible `base_url` (`platform/stt.py`, `tts.py`, `plugin add --kind stt|tts`); the STT must stream (realtime websocket); tested with private-ai's Moonshine and Kokoro-7M
    - [x] Tester LLM through any OpenAI-compatible `base_url` (vLLM, Ollama, private-ai, cloud providers), always streamed; many plugins, one active per kind (`livetest/platform/llm.py`, `plugin add|list|rm|use`)
-   - [x] Keys asked by `plugin add` / `init` (UI Plugins tab with module 11), saved in `~/.livetest/.env`, env vars override; never in the DB (`livetest/platform/keys.py`)
+   - [x] Keys asked by `plugin add` / `init` (or the UI's Plugins page), saved in `~/.livetest/.env`, env vars override; never in the DB (`livetest/platform/keys.py`)
 3. **Logs, traces and recordings for every test**
    - [x] Session-host events: tool calls, state changes, usage, metrics, what the agent's STT heard; plus the agent's prompt, tools, session options and chat history, all written to `events` as they arrive (`runtime/runner.py`)
-   - [x] Usage per test, counts only (no cost in v0.1): the agent's models from its last `session_usage_updated` (cumulative), the tester's from one `tester_usage` event at the end (text: its LLM's tokens summed; voice: its session's LLM / STT / TTS); saved as `results.usage` for every status, LLM tokens on each verdict line and the run total, everything in `--json` (`runtime/checks.py` `usage`, module 8)
+   - [x] Usage per test, counts only (no cost in v0.1): the agent's models from its last `session_usage_updated` (cumulative), the tester's from one `tester_usage` event at the end (LiveKit's `ModelUsageCollector` on its LLM, and STT / TTS in voice; LiveKit counts 0 tokens for a cancelled LLM call, e.g. a preemptive or interrupted one, so both sides under-count what the provider bills); saved as `results.usage` for every status, LLM tokens on each verdict line and the run total, everything in `--json` (`runtime/checks.py` `usage`, module 8)
    - [~] Tool calls rebuilt as tester-side OTel spans with real durations
    - [x] Local stereo `.ogg` (Opus) recording per voice test, channel 0 = agent, channel 1 = tester (`RecorderIO` wired by hand in `_voice`); browsers play it, so the UI and report are the players
    - [~] Grafana panel playing the recording next to traces
    - [x] Every run stored in `~/.livetest/livetest.db` (SQLite), recordings next to it (see "Results, logs and the UI"): `runs` + `results` + `events`, recordings as paths on `results`
    - [x] Log lines as `events` rows, tagged with their test through a `contextvar` (parallel-safe); console logging in `platform/logging.py`, `-v` global; tracebacks in `~/.livetest/errors.log` for bug reports (module 7)
    - [x] `livetest run start|list|logs|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop (DB statuses), `--json`, exit codes, 10 s reply rule (`cli.py`, `runtime/runner.py`, `runtime/store.py`)
-   - [x] `livetest report create`: one self-contained HTML per run or per test, recordings embedded; traces in LiveKit's own span shape, rebuilt from session-host events, with the recording playing along them (`ui/report.py`, `ui/static/run.html`, module 10)
+   - [x] `livetest report create`: one self-contained HTML per run or per test, recordings and fonts embedded (`--no-recordings` leaves them out); LiveKit's per-turn metrics as reported, nothing placed by guesswork (`ui/report.py`, `ui/static/run.html`, module 10; the test view becomes the C design in module 11)
    - [ ] `livetest report gate`: user-defined CI rules (later)
    - [ ] Optional OTLP export (Grafana, Langfuse, etc.); not required for a first run
 4. **LLM as judge**
@@ -282,11 +283,11 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
      - Fix types: a prompt diff, a tool-schema change, or a session option such as `min_endpointing_delay`
 5. **Scenarios that emulate the agent's users**
    - [x] DB at `~/.livetest/livetest.db`, created on first use (`livetest/platform/db.py`, tables in `livetest/runtime/store.py`)
-   - [x] `livetest init`: sets up the DB (UI serving comes with the UI)
+   - [x] `livetest init`: sets up the DB and prints the next steps, `livetest ui show` or the terminal commands for what's still missing; asks nothing, starts nothing, the same everywhere (the install scripts run it)
    - [x] `livetest agent add/list/rm`: the agent's LiveKit `agent_name` plus how to get a token; one prompt picks sandbox / endpoint / URL; `add` joins and saves only if the agent came; per-agent keys in `.env` (`livetest/cli.py`)
    - [x] `livetest profile …` / `livetest scenario add|list|rm` in the DB, flags only; scenario numbers never reused; `PRAGMA user_version` schema steps (`runtime/store.py`, `platform/db.py`)
    - [x] Scenario model: prompt, tags, `max_turns`, `max_minutes` (default 5), `expect` (tool_called / tool_not_called / no_tool_errors / latency) (`livetest/runtime/models.py`); evaluated by `livetest/runtime/checks.py` (module 6)
-   - [x] Deterministic checks (`livetest/runtime/checks.py`): built-ins silent / loops (consecutive replies ≥ 90% alike; revisit in v0.2) / finished in time (hitting `max_minutes` fails); tool called / not called (args as a subset, exact values), no tool errors, reply latency p95/p99 (tester clock, `tester_turn` → next `AS_SPEAKING`, nearest rank). Outcomes and verdict on the result row (`passed`, `checks`). Never joined stays a status; checks run only on `done`
+   - [x] Deterministic checks (`livetest/runtime/checks.py`): the scenario's own only (the built-ins loops / finished in time were removed 2026-11-13, for v0.2 with the judge); tool called / not called (args as a subset, exact values), no tool errors, reply latency p95/p99 (`checks.replies`, tester clock, nearest rank; voice: the tester stops speaking → its VAD hears the agent; text: line sent → `AS_SPEAKING`; cut-off turns skipped, unanswered ones fail). Outcomes and verdict on the result row (`passed`, `checks`). Never joined stays a status; checks run only on `done`
    - [ ] More checks, from user feedback: text contains / regex, token budget
    - [x] Profiles applied to every token: room metadata, participant metadata/attributes, dispatch metadata; tokens livetest didn't make are checked against the profile (`livetest/runtime/tokens.py`)
    - [x] Reusable profiles in the DB; what the agent actually saw recorded in each result (`seen` event: room metadata, the tester's metadata and attributes, the agent's attributes)
@@ -310,6 +311,16 @@ Many agents branch on `ctx.room.metadata`, `participant.metadata`, `participant.
 - [ ] **Import production transcripts as scenarios.**
 - [ ] **Cost estimate before a run.**
 - [ ] **Concurrency and load tests** (`lk perf` partly covers this).
+- [ ] **Multi-agent agents** (handoffs, a supervisor running `AgentTask`s, task groups; [LiveKit workflows](https://docs.livekit.io/agents/build/workflows/)). They all run in one `AgentSession`, so the tester's single session-host connection already sees them. Every switch arrives live as an `agent_handoff` item (`old_agent_id → new_agent_id`), and livetest records it today. What's missing: `agent_info` is asked once at join (the first agent's prompt and tools only), and `agent_config_update` items (each agent's instructions, tools added / removed) aren't sent live; they appear only in the chat history, also read once at join. Estimated ~1 day (user, 2026-11-13: later):
+  - runner: after each `agent_handoff`, ask for `agent_info` and `session_state` again; at the end, ask for `chat_history` again; the stub agent gets a tool that hands off, for a self-hosted test
+  - page: the agent active at each `agent_turn` and tool call (from the handoff times), an `agent_handoff old → new` row in Traces, and the Agent tab listing each agent's prompt, tools and config changes
+  - not planned unless asked: one connection per agent participant (a supervisor that's a separate participant in the room, 2–3 days); "handed off to X" / "tool called by agent X" checks (the user decides what fails)
+  - subagent delegation inside a tool stays a black box: only the tool's arguments, output and duration are seen
+- [ ] **More collected data, smallest first** (found 2026-11-13; the session host and room offer them, livetest doesn't save them yet):
+  - join and connect times per test (token, connect, agent joined); `agent add` already measures them (~1 h)
+  - WebRTC stats: the agent's through the session host's `get_rtc_stats` request (no client helper in 1.7.1), the tester's from `room.get_rtc_stats()` (~3 h)
+  - the agent's `lk.transcription` stream with segment timings (~½ day)
+  - overlap and silence measured from the stereo recording (1–2 days, audio analysis)
 
 ## Tech stack (searched 2026-11-06)
 
@@ -352,9 +363,9 @@ Only `livetest/` ships to users (the wheel holds nothing else). The rest of the 
 ```
 livetest/
 ├── platform/      what livetest needs to run, kept generic: db.py, keys.py, llm.py; stt.py, tts.py, logging.py (empty: where they go)
-├── runtime/       what livetest does: models.py, store.py, tokens.py, session.py; runner, checks
+├── runtime/       what livetest does: models.py, store.py, tokens.py, session.py, setup.py (add / list / remove, shared by CLI and UI); runner, checks
 ├── integrations/  optional extras, switched on by the entry point: otel.py (empty: where OTLP export to Grafana / Langfuse goes)
-├── ui/            entry point: report.py (static/run.html with a run's rows baked in); module 11 adds server.py (aiohttp + JSON API) and static/app.html (the shell)
+├── ui/            entry point: report.py (static/run.html with a run's rows baked in), server.py (aiohttp + JSON API serving run.html and static/app.html, the shell)
 └── cli.py         entry point
 tests/             pytest (dev-only dependency); test_layers.py enforces the rule below
 dev/               contributor-only: livekit-server.yaml (self-hosted LiveKit for the live tests)
@@ -388,21 +399,25 @@ events   (result, ts, source, type, data)   -- source agent | tester | log, data
 - **A, the app shell:**
   - sidebar: TEST (Runs, Scenarios, Profiles), SETUP (Agents, Plugins, Settings)
   - runs as a list or cards, with a date filter and the score only
-  - run page: stats, live wall, problems grouped by failed check, attempt dots
+  - run page: stats, live wall, failed checks and agent errors grouped by check, attempt dots
   - report screen (what's inside, sizes)
   - Plugins: tester LLM, STT and TTS, cloud or local / OpenAI-compatible
   - new-run drawer, first-run checklist
-- **C, the test page:**
-  - timeline player: audio, turns, state, reply gap, tools and problems lanes; zoom
-  - usage strip in ms and tokens incl. cached
-  - inspector, karaoke transcript, Copy as JSON
+- **C, the test page** (`/runs/<run>/tests/<n>`), the one design for a test, in the app and in the report file (user, 2026-11-12):
+  - a fixed top (cards, checks, a sticky player with both sides' state bands) over tabs: Traces · Turns · Transcript · Events · Usage · Agent · Logs, with an Inspector beside them; keyboard (Space, ← →, J / K, /, Esc); links with `?t=&tab=&span=`
+  - Traces: LiveKit's span tree with both sides (`tester_turn`: its LLM thinking, TTS speaking, the agent hearing it; `agent_turn`: thinking, llm_node, tts_node, tools, speaking, the reply gap, errors), with the recording playing along it; the voice tester's own states are recorded for it
+  - usage strip in ms and tokens incl. cached, with both sides' models
+  - checks and problems in time order, as data: livetest draws no conclusions of its own (pass / fail come from the scenario's checks and the 10 s reply rule)
+  - transcript that highlights the turn being spoken; inspector with Copy as JSON
+  - logs and what the agent showed (prompt, tools, options, profile sent)
   - download this test's report
-- **R, the report file:** the same page, offline, for a whole run or one test: summary (incl. agent error count), problems (incl. agent errors), scenarios, test detail, traces, logs, agent info, profile sent.
+- **The report file** is the same pages offline: a whole run is the run overview, with each test opening as C; one test is just its C page.
 - **Usage is two sets:** the agent's own (its session usage) and LiveTest's to run the test (the tester's models). Shown as counts, no cost (later version).
 - **Only what we measure:** no LLM judge (verdicts, root causes, fixes), no run-to-run comparisons, no known-issue tracking until they're designed.
 - **Live:** transcript, state, tool calls and usage stream in; the recording arrives when each test ends (v0.1).
-- **JSON API** (`/api/runs`, `/api/results/<id>`, `/api/results/<id>/events`): the same data the page uses.
-- Still to design: agent detail with what the agent showed (prompt, tools), the scenario editor, the profile editor.
+- **JSON API** (`ui/server.py`): `/api/runs`; `/api/runs/<run>[?test=N]`, the same rows `report create` bakes in (`report.data`), each recording as `/api/results/<id>/recording` (Range); `POST /api/runs/<run>/stop`; `/api/runs/<run>/report[/sizes][?test=N&recordings=0]`; the setup kinds (`/api/{agents|profiles|scenarios|plugins}`, scenarios with their last score); `/api/plugins/<name>/check`; `/api/settings`; `/fonts/`. Only `Host: 127.0.0.1 | localhost`, and every write only as JSON, so other websites can't read or act on it (DNS rebinding, forms).
+- **Built in module 11, to the A board** (`ui/server.py`, `static/app.html`, `run.html` served, `static/fonts/`): Inter and JetBrains Mono ship with livetest (OFL) and go inside reports. Sidebar with Jump to (Ctrl K) and New run; a 4-step Welcome until the first run; Runs grouped by day with a date filter and List / Cards; Scenarios / Profiles / Agents (Add opens a side drawer with what the CLI's flags take, Remove per row, the CLI command below); Plugins as three cards (LLM, STT, TTS: Test connection checks and saves as the active one) over the saved list; a read-only Settings page; the New run drawer (tag filter, last-score chips, the plan built as you pick, extras under More options, greyed out while starting; the run lives in the UI's process); run pages with the sidebar, Copy link, Stop, Re-run failed / Run again (the drawer pre-filled), Report, and a Live now strip; each test as the C page (`/runs/<run>/tests/<n>`, and `#tests/<n>` in a report file); the Report screen (scope, Include recordings = `report create --no-recordings`, each section's measured size, Download). `ui stop` stops the UI's own runs cleanly first. Add and remove go through `runtime/setup.py`, the run through `runner.prepare` / `queue` / `launch`, the same functions as the CLI.
+- Still to design: agent detail with what the agent showed (prompt, tools); a richer scenario editor (the form mirrors the CLI's flags) and profile editor; editing in place (rule 2: remove and add again).
 
 ### Recordings in the UI
 
@@ -428,24 +443,24 @@ One module at a time. The loop for each: **plan** (files, functions, CLI surface
 | 3 | [x] | Tokens: sandbox, endpoint, API key (per-agent keys in `.env`), raw token; profile applied to each; tokens livetest didn't make checked against the profile. `agent add` joins and waits for the agent before saving; `init` offers an agent, then an LLM | `runtime/tokens.py`, `runtime/session.py`, `cli.py` | pytest + deployed Baymax (Cloud) | yes |
 | 4 | — | ~~`agent probe`~~: dropped (user, 2026-11-08). Joining moved into `agent add` (module 3); reading prompt / tools / session options moves into the run (module 5) | | | |
 | 5 | [x] | One text-mode test: tester LLM drives `RemoteSession`; reads and records the agent's prompt / tools / session options; ends on max_turns / max_minutes / agent ends; results, events, logs written live | `runtime/runner.py`, `runtime/store.py`, `runtime/session.py`, `platform/logging.py` | pytest + self-hosted stub agent (`tests/stub_agent.py`) | yes |
-| 6 | [x] | Checks: built-ins (never joined, silent, loops) + user-set (tool checks with expected vs actual, latency p95/p99, finish within N min) | `runtime/checks.py` | pytest on saved event dumps | no |
+| 6 | [x] | Checks: the scenario's own (tool checks with expected vs actual, latency p95/p99); the built-ins were removed 2026-11-13 (v0.2) | `runtime/checks.py` | pytest on saved event dumps | no |
 | 7 | [x] | `run start\|list\|logs\|stop`: selection grammar, run ids, confirmation, `--parallel`, Stop, `--json`, exit codes | `cli.py`, `runtime/runner.py` | pytest + self-hosted | yes |
 | 8 | [x] | Usage: the agent's (its session usage) and the tester's (its LLM's tokens), saved on each result; no cost (user, 2026-11-12) | `runtime/checks.py`, `runtime/runner.py`, `runtime/store.py`, `platform/llm.py`, `cli.py` | pytest on saved usage | no |
 | 9 | [x] | Voice mode and recording (after the test ends) | `runtime/runner.py` | self-hosted, voice stub | yes |
 | 10 | [x] | `report create`: one offline HTML file | `ui/report.py`, `ui/static/` | open the file | no |
 | 11 | [ ] | `livetest ui`: aiohttp + JSON API + the A/C page | `ui/server.py`, `ui/static/` | browser | no |
 | 12 | [ ] | `livetest doctor` | `cli.py` | pytest | partly |
-| 13 | [ ] | Install scripts (sh / iex via `uv tool install`); upgrading = re-running them, which stops the background UI first | `install.sh`, `install.ps1` | fresh install on Windows | no |
+| 13 | [ ] | Install scripts (sh / iex via `uv tool install`), ending with `livetest init`; upgrading = re-running them, which stops the background UI first | `install.sh`, `install.ps1` | fresh install on Windows | no |
 
 - **Decided before module 5:** no session-host-off fallback (`lk.chat`); the session host is required (user, 2026-11-08).
-- **Assumed, confirm before module 11:** the UI ships in v0.1 (the live-view decisions point that way; the old roadmap had it in v0.2).
+- **The UI ships in v0.1** (user confirmed before module 11, 2026-11-12).
 
 ## Roadmap (proposed)
 
 | Version | Scope |
 |---|---|
 | v0.1 | See "v0.1 build order": connection modes, `-h` everywhere, `agent add` that joins, scenarios + profiles, text mode (voice optional), recording, deterministic checks, parallel, usage, SQLite results, `report`, UI, `doctor`, exit codes, standalone install. No judge |
-| v0.2 | Local tester models, cost (price table and user-set prices, on top of saved usage), STT accuracy, judge (once designed); consider: agent errors failing a test (or v0.3), a better loop rule than 90% alike |
+| v0.2 | Local tester models, cost (price table and user-set prices, on top of saved usage), STT accuracy, judge (once designed) with reply-time, loop and time-limit checks, multi-agent agents (handoffs, tasks: see Extras); consider: agent errors failing a test (or v0.3) |
 | v0.3 | `generate`, repeat-N, `diff`, JUnit and GitHub Action, MCP server |
 | v0.4 | Perturbations, security pack, concurrency, SIP |
 
