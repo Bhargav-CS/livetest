@@ -124,13 +124,13 @@ class Plan:
                 + "\nopens: " + (f'tester ("{self.opening}")' if self.opening else "agent"))
 
 
-def prepare(db, home: Path, name: str, items: list[str], *, run: str | None = None, profile: str | None = None,
-            parallel: int = 4, voice: bool = False, plugins: dict[str, str | None] = {}, recordings: bool = True,
-            opening: str | None = None, token: str | None = None) -> Plan:
+async def prepare(db, home: Path, name: str, items: list[str], *, run: str | None = None, profile: str | None = None,
+                  parallel: int = 4, voice: bool = False, plugins: dict[str, str | None] = {}, recordings: bool = True,
+                  opening: str | None = None, token: str | None = None) -> Plan:
     """Check everything a run needs, saving nothing: the agent, the selection, the run id, the profile, the tester's
-    plugins (`plugins` names any but the active ones, by kind) and one token, so a bad token, a profile mismatch or a
-    missing key fails here. `home` is the DB's folder (.env, recordings/). ValueError: bad input;
-    ConnectionError: the token source didn't answer."""
+    plugins (`plugins` names any but the active ones, by kind) and that each answers, and one token, so a bad token, a
+    profile mismatch, a missing key or a stopped plugin server fails here. `home` is the DB's folder (.env, recordings/).
+    ValueError: bad input; ConnectionError: the token source or a plugin didn't answer."""
     agent = setup.find(db, Agent, name)
     tests = select(items, store.rows(db, Scenario))
     run = run_id(run) if run else store.next_run_id(db)
@@ -158,6 +158,7 @@ def prepare(db, home: Path, name: str, items: list[str], *, run: str | None = No
     rooms = ([jwt.decode(token, options={"verify_signature": False}).get("video", {}).get("room", "")] if token  # its room
              else [f"livetest-{run}-{n}-{uuid.uuid4().hex[:6]}" for n in range(1, len(tests) + 1)])
     folder = home / "recordings" / f"run-{run}" if voice and recordings else None
+    await asyncio.gather(*(setup.check_plugin(env, p) for p in used))
     return Plan(run, agent, tests, rooms, found, used, parallel, folder, opening, connect, key, secret)
 
 
